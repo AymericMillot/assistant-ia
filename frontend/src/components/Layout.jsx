@@ -33,6 +33,26 @@ export default function Layout({ children }) {
       .catch(() => {});
   }, []);
 
+  // Onglet du navigateur : titre et favicon reconfigurables par instance
+  // (administration > Identite), pour ne pas rester colle a un client
+  // particulier sur ce projet generique.
+  useEffect(() => {
+    document.title = branding.tabTitle || branding.projectName || "Assistant local";
+  }, [branding.tabTitle, branding.projectName]);
+
+  useEffect(() => {
+    if (!branding.faviconDataUrl) {
+      return;
+    }
+    let link = document.querySelector("link[rel~='icon']");
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.href = branding.faviconDataUrl;
+  }, [branding.faviconDataUrl]);
+
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     try {

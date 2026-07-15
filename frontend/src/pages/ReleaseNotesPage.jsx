@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { fetchJson } from "../lib/api";
 import { reportError } from "../lib/errors";
 
@@ -115,11 +114,6 @@ export default function ReleaseNotesPage() {
             </h1>
             <p className="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
               Cette page regroupe les évolutions publiées du projet, à titre informatif.
-              L&apos;installation des mises à jour se fait uniquement depuis{" "}
-              <Link to="/admin" className="font-medium text-slate-700 underline decoration-slate-300 underline-offset-4 dark:text-slate-300 dark:decoration-slate-600">
-                l&apos;administration
-              </Link>
-              .
             </p>
           </div>
 

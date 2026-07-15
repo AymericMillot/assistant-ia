@@ -1,5 +1,6 @@
 import express from "express";
 import bcrypt from "bcrypt";
+import multer from "multer";
 import {
   countAdminUsersByRole,
   createAdminUser,
@@ -1193,19 +1194,52 @@ router.patch("/branding", (req, res, next) => {
         max: 200
       });
     }
-    if (body.supportEmailUrgent !== undefined) {
-      updates.supportEmailUrgent = ensureSafeText(body.supportEmailUrgent, "Email de support (urgence)", {
-        min: 0,
-        max: 200
-      });
-    }
-    if (body.repositoryUrl !== undefined) {
-      updates.repositoryUrl = body.repositoryUrl
-        ? ensureSafeHttpUrl(body.repositoryUrl, "Lien du depot")
-        : "";
+    if (body.tabTitle !== undefined) {
+      updates.tabTitle = ensureSafeText(body.tabTitle, "Titre de l'onglet", { min: 0, max: 70 });
     }
 
     const branding = writeBranding(updates);
+    res.json(branding);
+  } catch (error) {
+    next(error);
+  }
+});
+
+const faviconMaxBytes = 512 * 1024;
+const faviconAllowedMimeTypes = new Set(["image/png", "image/x-icon", "image/vnd.microsoft.icon", "image/svg+xml", "image/jpeg"]);
+const faviconUploadMiddleware = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: faviconMaxBytes }
+});
+
+router.post("/branding/favicon", faviconUploadMiddleware.single("favicon"), (req, res, next) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      const error = new Error("Aucun fichier recu.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (!faviconAllowedMimeTypes.has(file.mimetype)) {
+      const error = new Error("Format non supporte. Utilisez PNG, ICO, SVG ou JPEG.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const faviconDataUrl = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+    const branding = writeBranding({ faviconDataUrl });
+    logAudit(req, "branding.favicon-update", {});
+    res.json(branding);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete("/branding/favicon", (req, res, next) => {
+  try {
+    const branding = writeBranding({ faviconDataUrl: "" });
+    logAudit(req, "branding.favicon-remove", {});
     res.json(branding);
   } catch (error) {
     next(error);

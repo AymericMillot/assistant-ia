@@ -8,6 +8,11 @@ const brandingDataPath = path.resolve(
   process.env.BRANDING_PATH || "data/branding.json"
 );
 
+// Contact d'urgence fixe (developpeur du projet) : non configurable par
+// instance, ni depuis l'administration. Le support technique courant
+// (supportEmail) reste lui entierement personnalisable par instance.
+const fixedEmergencySupportEmail = "hello@aymericmillot.com";
+
 let cachedBranding = null;
 let cachedBrandingMtimeMs = null;
 
@@ -28,8 +33,9 @@ function loadDefaultBranding() {
       shortName: "L'assistant",
       welcomeMessage: "",
       supportEmail: "",
-      supportEmailUrgent: "",
-      repositoryUrl: ""
+      supportEmailUrgent: fixedEmergencySupportEmail,
+      tabTitle: "",
+      faviconDataUrl: ""
     };
   }
 }
@@ -53,7 +59,7 @@ export function readBranding() {
     }
   }
 
-  const merged = { ...defaults, ...overrides };
+  const merged = { ...defaults, ...overrides, supportEmailUrgent: fixedEmergencySupportEmail };
 
   cachedBranding = merged;
   return merged;
@@ -65,7 +71,7 @@ export function getBranding() {
 
 export function writeBranding(partialUpdate) {
   const current = readBranding();
-  const next = { ...current, ...partialUpdate };
+  const next = { ...current, ...partialUpdate, supportEmailUrgent: fixedEmergencySupportEmail };
 
   fs.mkdirSync(path.dirname(brandingDataPath), { recursive: true });
   fs.writeFileSync(brandingDataPath, JSON.stringify(next, null, 2), "utf8");

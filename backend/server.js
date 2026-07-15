@@ -285,7 +285,9 @@ app.get("/api/branding", (_req, res) => {
     shortName: branding.shortName,
     welcomeMessage: branding.welcomeMessage,
     supportEmail: branding.supportEmail,
-    supportEmailUrgent: branding.supportEmailUrgent
+    supportEmailUrgent: branding.supportEmailUrgent,
+    tabTitle: branding.tabTitle,
+    faviconDataUrl: branding.faviconDataUrl
   });
 });
 
