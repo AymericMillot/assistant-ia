@@ -27,7 +27,6 @@ import {
   setSetting,
   setSettingEncrypted,
   updateAdminUserPasswordById,
-  updateAdminUserRoleById,
   updateManualResource
 } from "../config/db.js";
 import { clearIndexationLogs, getRecentIndexationLogs, logger } from "../config/logger.js";
@@ -1941,15 +1940,6 @@ router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
   }
 });
 
-function ensureAdminRole(value) {
-  if (value === "owner" || value === "teacher") {
-    return value;
-  }
-  const error = new Error("Role invalide (owner ou teacher).");
-  error.statusCode = 400;
-  throw error;
-}
-
 function ensureAdminIdentifiant(value) {
   const identifiant = ensureSafeText(value, "Identifiant", { min: 3, max: 120 });
   if (!/^[\p{L}\p{N}._@-]+$/u.test(identifiant)) {
@@ -1972,7 +1962,11 @@ function requireExistingAdminUser(id) {
 
 // Comptes admin nommes (identifiant + mot de passe propres) : reserve au role
 // "owner", pour creer des acces distincts en plus des mots de passe partages
-// owner/teacher/rotatif geres ailleurs.
+// owner/administrateur/rotatif geres ailleurs. Le role "owner" n'est jamais
+// assignable via cette API (ni a la creation, ni en modification) : il n'y a
+// qu'un seul proprietaire, defini une fois pour toutes a l'installation
+// (ADMIN_EMAIL/ADMIN_PASSWORD_HASH). Tout compte cree ici est un compte
+// "administrateur" ordinaire, sans possibilite de s'auto-promouvoir.
 router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
   try {
     res.json({ users: listAdminUsers() });
@@ -1985,12 +1979,11 @@ router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
   try {
     const identifiant = ensureAdminIdentifiant(req.body?.identifiant);
     const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 8, max: 256 });
-    const role = ensureAdminRole(req.body?.role);
 
     const passwordHash = await bcrypt.hash(password, 12);
     let user;
     try {
-      user = createAdminUser({ identifier: identifiant, passwordHash, role });
+      user = createAdminUser({ identifier: identifiant, passwordHash, role: "teacher" });
     } catch (dbError) {
       if (String(dbError?.code || "").includes("CONSTRAINT")) {
         const error = new Error("Cet identifiant est deja utilise.");
@@ -2002,8 +1995,7 @@ router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
 
     logAudit(req, "admin-users.create", {
       targetType: "admin_user",
-      targetId: user.id,
-      details: { identifiant, role }
+      targetId: user.id
     });
     res.status(201).json({ user });
   } catch (error) {
@@ -2021,26 +2013,6 @@ router.put("/admin-users/:id/password", requireRole("owner"), async (req, res, n
     updateAdminUserPasswordById(id, passwordHash);
     logAudit(req, "admin-users.reset-password", { targetType: "admin_user", targetId: id });
     res.json({ message: "Mot de passe mis a jour." });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.put("/admin-users/:id/role", requireRole("owner"), (req, res, next) => {
-  try {
-    const id = parsePositiveInt(req.params.id, "Identifiant du compte");
-    const role = ensureAdminRole(req.body?.role);
-    const target = requireExistingAdminUser(id);
-
-    if (target.role === "owner" && role !== "owner" && countAdminUsersByRole("owner") <= 1) {
-      const error = new Error("Impossible de retirer le role du dernier compte proprietaire.");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    updateAdminUserRoleById(id, role);
-    logAudit(req, "admin-users.update-role", { targetType: "admin_user", targetId: id, details: { role } });
-    res.json({ message: "Role mis a jour." });
   } catch (error) {
     next(error);
   }

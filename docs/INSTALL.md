@@ -44,8 +44,8 @@ Toutes les questions sont alors sautées et les valeurs par défaut (`.env.examp
   bas).
 - Administration : `http://localhost:3000/admin`.
 - Mot de passe d'accès temporaire : `./password`.
-- Mot de passe enseignant généré automatiquement : affiché une seule fois à la fin de
-  l'installation. Le changement est imposé à la première connexion enseignant.
+- Mot de passe administrateur généré automatiquement : affiché une seule fois à la fin de
+  l'installation. Le changement est imposé à la première connexion administrateur.
 
 ## Personnalisation
 

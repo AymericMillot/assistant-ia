@@ -74,7 +74,7 @@ export function generateAccessPassword(date = new Date(), timeZone = defaultTime
 /**
  * Les mots de passe permanents (owner/teacher) sont stockés en base (bcrypt),
  * pas en variable d'environnement : cela permet de changer le mot de passe
- * enseignant depuis l'admin sans redéployer.
+ * administrateur depuis l'admin sans redéployer.
  */
 export function getOwnerPasswordHash() {
   return String(getSetting("ownerPasswordHash", "") || "").trim();
@@ -108,7 +108,7 @@ function generateRandomPassword(length = 16) {
 }
 
 /**
- * Genere un nouveau mot de passe enseignant aleatoire, le stocke (bcrypt) et
+ * Genere un nouveau mot de passe administrateur aleatoire, le stocke (bcrypt) et
  * impose son changement a la prochaine connexion. Utilise en fin d'installation
  * et par le script reset-teacher-password.js. Le mot de passe en clair n'est
  * jamais stocke : il doit etre communique immediatement a l'appelant.
@@ -124,7 +124,7 @@ export async function generateAndSetTeacherPassword() {
 /**
  * Valide un mot de passe d'accès admin et renvoie le rôle associé :
  * - "owner" : mot de passe permanent du propriétaire (accès export/déploiement inclus)
- * - "teacher" : mot de passe permanent enseignant (accès admin sauf export/déploiement)
+ * - "teacher" : mot de passe permanent administrateur (accès admin sauf export/déploiement)
  * - "app" : mot de passe rotatif horaire (accès admin générique sauf export/déploiement)
  * - null si aucune correspondance
  */

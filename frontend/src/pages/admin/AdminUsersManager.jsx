@@ -7,7 +7,7 @@ import StatusBadge from "../../components/ui/StatusBadge";
 
 const roleLabels = {
   owner: "Propriétaire",
-  teacher: "Enseignant"
+  teacher: "Administrateur"
 };
 
 function generatePassword() {
@@ -26,7 +26,6 @@ export default function AdminUsersManager() {
 
   const [identifiant, setIdentifiant] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("teacher");
   const [creating, setCreating] = useState(false);
 
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
@@ -67,12 +66,11 @@ export default function AdminUsersManager() {
     try {
       await fetchJson("/api/admin/admin-users", {
         method: "POST",
-        body: JSON.stringify({ identifiant, password, role })
+        body: JSON.stringify({ identifiant, password })
       });
       setSuccess(`Compte "${identifiant}" créé.`);
       setIdentifiant("");
       setPassword("");
-      setRole("teacher");
       await loadUsers();
     } catch (requestError) {
       setError(reportError("admin-users-create", requestError));
@@ -97,26 +95,6 @@ export default function AdminUsersManager() {
       await loadUsers();
     } catch (requestError) {
       setError(reportError("admin-users-delete", requestError));
-    }
-  }
-
-  async function handleRoleChange(user, nextRole) {
-    if (nextRole === user.role) {
-      return;
-    }
-
-    setError("");
-    setSuccess("");
-
-    try {
-      await fetchJson(`/api/admin/admin-users/${user.id}/role`, {
-        method: "PUT",
-        body: JSON.stringify({ role: nextRole })
-      });
-      setSuccess(`Rôle de "${user.identifier}" mis à jour.`);
-      await loadUsers();
-    } catch (requestError) {
-      setError(reportError("admin-users-role", requestError));
     }
   }
 
@@ -154,7 +132,8 @@ export default function AdminUsersManager() {
         </h2>
         <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
           Créez des accès administrateur nommés (identifiant + mot de passe propres à chaque
-          personne), en plus des mots de passe partagés (propriétaire, enseignant, rotatif).
+          personne). Ces comptes ne peuvent jamais devenir propriétaire — il n'y en a qu'un seul,
+          défini une fois pour toutes à l'installation.
         </p>
       </section>
 
@@ -164,7 +143,7 @@ export default function AdminUsersManager() {
       <section className="subpanel p-6">
         <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Nouveau compte</h3>
         <form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={handleCreate}>
-          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 sm:col-span-2">
             Identifiant
             <input
               type="text"
@@ -175,14 +154,6 @@ export default function AdminUsersManager() {
               autoComplete="off"
               required
             />
-          </label>
-
-          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-            Rôle
-            <select className="input mt-2" value={role} onChange={(event) => setRole(event.target.value)}>
-              <option value="teacher">Enseignant</option>
-              <option value="owner">Propriétaire</option>
-            </select>
           </label>
 
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 sm:col-span-2">
@@ -262,14 +233,6 @@ export default function AdminUsersManager() {
                 </div>
 
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
-                  <select
-                    className="input px-2 py-1.5 text-xs"
-                    value={user.role}
-                    onChange={(event) => handleRoleChange(user, event.target.value)}
-                  >
-                    <option value="teacher">Enseignant</option>
-                    <option value="owner">Propriétaire</option>
-                  </select>
                   <button
                     className="ghost-button px-3 py-1.5 text-xs"
                     type="button"

@@ -152,7 +152,7 @@ Le script prepare automatiquement le projet :
 6. lance les services Docker necessaires et attend qu'Ollama soit pret
 7. telecharge le modele principal choisi (ou par defaut) et le modele d'embedding
 8. demarre toute la plateforme
-9. genere et affiche le mot de passe enseignant initial (changement impose a la premiere
+9. genere et affiche le mot de passe administrateur initial (changement impose a la premiere
    connexion)
 
 Une fois termine, tu peux ouvrir :

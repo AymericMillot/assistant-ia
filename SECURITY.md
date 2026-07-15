@@ -18,7 +18,7 @@ fois le problème confirmé, avec crédit au rapporteur si souhaité.
 
 ## Bonnes pratiques déjà en place
 
-- Mots de passe permanents (owner/enseignant) stockés en bcrypt, jamais en clair.
+- Mots de passe permanents (owner/administrateur) stockés en bcrypt, jamais en clair.
 - Mot de passe d'accès rotatif horaire dérivé de `APP_PASSWORD_SEED` (jamais stocké tel quel).
 - Secrets sensibles (identifiants FTP de déploiement, etc.) chiffrés au repos en base
   (AES-256-GCM) via `CONFIG_ENCRYPTION_KEY` plutôt que stockés en clair dans `.env`.
@@ -31,7 +31,7 @@ fois le problème confirmé, avec crédit au rapporteur si souhaité.
 
 - Générer des valeurs uniques et privées pour `JWT_SECRET`, `APP_PASSWORD_SEED` et
   `CONFIG_ENCRYPTION_KEY` (ne jamais réutiliser les exemples de `.env.example`).
-- Changer le mot de passe enseignant généré automatiquement à la première connexion (imposé par
+- Changer le mot de passe administrateur généré automatiquement à la première connexion (imposé par
   l'application, mais à ne pas contourner).
 - Restreindre l'accès réseau au strict nécessaire (le port applicatif uniquement ; Ollama,
   ChromaDB et Redis ne doivent pas être exposés publiquement).

@@ -329,9 +329,9 @@ export default function DeploymentManager() {
       </section>
 
       <section className="subpanel p-6">
-        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Mot de passe enseignants</h3>
+        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Mot de passe administrateurs</h3>
         <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-          Change le mot de passe permanent utilisé par les enseignants pour déposer des documents
+          Change le mot de passe permanent utilisé par les administrateurs pour déposer des documents
           à indexer. Sans effet sur ton propre mot de passe.
         </p>
 
@@ -369,7 +369,7 @@ export default function DeploymentManager() {
           {teacherPasswordError ? <Alert tone="error">{teacherPasswordError}</Alert> : null}
 
           <button className="soft-button" disabled={teacherPasswordSaving}>
-            {teacherPasswordSaving ? "Mise à jour..." : "Mettre à jour le mot de passe enseignants"}
+            {teacherPasswordSaving ? "Mise à jour..." : "Mettre à jour le mot de passe administrateurs"}
           </button>
         </form>
       </section>

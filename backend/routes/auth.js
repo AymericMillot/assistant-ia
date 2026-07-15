@@ -141,7 +141,7 @@ router.put(
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe administrateur doit contenir au moins 12 caracteres." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -154,11 +154,11 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
+    return res.json({ message: "Mot de passe administrateur mis a jour avec succes." });
   }
 );
 
-// Auto-service : l'enseignant change lui-meme son mot de passe (notamment lors
+// Auto-service : l'administrateur change lui-meme son mot de passe (notamment lors
 // du changement impose apres la generation automatique d'un mot de passe).
 router.put(
   "/teacher-password/self",
@@ -171,7 +171,7 @@ router.put(
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe administrateur doit contenir au moins 12 caracteres." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -184,7 +184,7 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
+    return res.json({ message: "Mot de passe administrateur mis a jour avec succes." });
   }
 );
 

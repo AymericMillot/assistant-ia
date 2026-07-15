@@ -636,13 +636,13 @@ has_teacher_password="$(
 
 teacher_password_message=""
 if [[ "$has_teacher_password" != "1" ]]; then
-  echo "Generation du mot de passe enseignant initial..."
+  echo "Generation du mot de passe administrateur initial..."
   generated_teacher_password="$(
     docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T backend \
       node scripts/reset-teacher-password.js 2>/dev/null | tail -n 2 | head -n 1 || true
   )"
   if [[ -n "$generated_teacher_password" ]]; then
-    teacher_password_message="Mot de passe enseignant initial : ${generated_teacher_password} (changement impose a la premiere connexion enseignant)"
+    teacher_password_message="Mot de passe administrateur initial : ${generated_teacher_password} (changement impose a la premiere connexion administrateur)"
   fi
 fi
 

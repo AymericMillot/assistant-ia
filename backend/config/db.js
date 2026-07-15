@@ -498,12 +498,6 @@ export function updateAdminUserPasswordById(id, passwordHash) {
     .run({ id, passwordHash });
 }
 
-export function updateAdminUserRoleById(id, role) {
-  return getDb()
-    .prepare("UPDATE admin_users SET role = @role, updated_at = CURRENT_TIMESTAMP WHERE id = @id")
-    .run({ id, role });
-}
-
 export function deleteAdminUser(id) {
   return getDb().prepare("DELETE FROM admin_users WHERE id = ?").run(id);
 }

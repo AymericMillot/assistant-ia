@@ -18,7 +18,7 @@ const actionLabels = {
   "model.delete": "Suppression de modèle",
   "system.purge-all-data": "Suppression de toutes les données",
   "system.purge-conversations-feedback": "Suppression des conversations et feedbacks",
-  "auth.teacher-password-change": "Changement du mot de passe enseignant",
+  "auth.teacher-password-change": "Changement du mot de passe administrateur",
   "deployment.publish": "Publication d'une version",
   "update.apply": "Installation d'une mise à jour",
   "update.rollback": "Retour arrière (rollback)"
@@ -26,7 +26,7 @@ const actionLabels = {
 
 const roleLabels = {
   owner: "Propriétaire",
-  teacher: "Enseignant",
+  teacher: "Administrateur",
   app: "Mot de passe rotatif"
 };
 
