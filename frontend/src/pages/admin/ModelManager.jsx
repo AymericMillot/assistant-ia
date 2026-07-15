@@ -40,6 +40,7 @@ export default function ModelManager({ onRefreshSummary }) {
     diskGb: "",
     notes: ""
   });
+  const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [recommendation, setRecommendation] = useState(null);
   const [recommendationBusy, setRecommendationBusy] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
@@ -443,26 +444,38 @@ export default function ModelManager({ onRefreshSummary }) {
 
             <div className="flex flex-wrap items-center gap-2">
               <button
-                className="ghost-button"
-                disabled={catalogRefreshBusy}
-                onClick={refreshCatalog}
+                className="soft-button"
+                onClick={() => setCatalogExpanded((current) => !current)}
                 type="button"
               >
-                {catalogRefreshBusy ? "Actualisation..." : "Actualiser le catalogue"}
+                {catalogExpanded ? "Masquer" : "Afficher les suggestions"}
               </button>
-              {installViews.map((view) => (
-                <button
-                  key={view.id}
-                  className={activeView === view.id ? "soft-button" : "ghost-button"}
-                  disabled={busy}
-                  onClick={() => setActiveView(view.id)}
-                >
-                  {view.label}
-                </button>
-              ))}
+              {catalogExpanded ? (
+                <>
+                  <button
+                    className="ghost-button"
+                    disabled={catalogRefreshBusy}
+                    onClick={refreshCatalog}
+                    type="button"
+                  >
+                    {catalogRefreshBusy ? "Actualisation..." : "Actualiser le catalogue"}
+                  </button>
+                  {installViews.map((view) => (
+                    <button
+                      key={view.id}
+                      className={activeView === view.id ? "soft-button" : "ghost-button"}
+                      disabled={busy}
+                      onClick={() => setActiveView(view.id)}
+                    >
+                      {view.label}
+                    </button>
+                  ))}
+                </>
+              ) : null}
             </div>
           </div>
 
+          {catalogExpanded ? (
           <div className="mt-6 space-y-6">
             {displayedFamilies.map((family) => (
               <div
@@ -529,6 +542,7 @@ export default function ModelManager({ onRefreshSummary }) {
               </div>
             ))}
           </div>
+          ) : null}
         </section>
       ) : null}
 
