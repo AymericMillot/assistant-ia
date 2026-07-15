@@ -63,6 +63,7 @@ export function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'teacher',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -368,9 +369,19 @@ export function initializeDatabase() {
   migrateMessagesToConversationExchanges();
   backfillFeedbackExchangeIds();
 
+  const adminUserColumns = dbInstance.prepare("PRAGMA table_info(admin_users)").all();
+  const hasAdminUserRoleColumn = adminUserColumns.some((column) => column.name === "role");
+  if (!hasAdminUserRoleColumn) {
+    dbInstance.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'teacher'");
+  }
+
+  // Le premier compte admin nomme est cree a l'installation (identifiant +
+  // hash bcrypt generes par install.sh) avec le role "owner" : c'est le
+  // compte de depart pour gerer ensuite d'autres comptes admin locaux.
   ensureAdminUser(
     process.env.ADMIN_EMAIL || "admin@fablab.local",
-    process.env.ADMIN_PASSWORD_HASH || ""
+    process.env.ADMIN_PASSWORD_HASH || "",
+    "owner"
   );
 
   return dbInstance;
@@ -426,7 +437,7 @@ export function setSettingEncrypted(key, plainValue) {
   setSetting(key, encryptSecret(plainValue));
 }
 
-export function ensureAdminUser(email, passwordHash) {
+export function ensureAdminUser(email, passwordHash, role = "teacher") {
   const existingUser = getDb().prepare("SELECT id FROM admin_users WHERE email = ?").get(email);
   if (existingUser || !passwordHash) {
     return;
@@ -434,31 +445,67 @@ export function ensureAdminUser(email, passwordHash) {
 
   getDb()
     .prepare(`
-      INSERT INTO admin_users (email, password_hash)
-      VALUES (@email, @password_hash)
+      INSERT INTO admin_users (email, password_hash, role)
+      VALUES (@email, @password_hash, @role)
     `)
-    .run({ email, password_hash: passwordHash });
+    .run({ email, password_hash: passwordHash, role });
 }
 
-export function findAdminByEmail(email) {
+const adminUserSelectColumns = "id, email AS identifier, role, created_at AS createdAt, updated_at AS updatedAt";
+
+/**
+ * Comptes admin nommes (identifiant + mot de passe propres), en plus des
+ * mots de passe partages historiques (rotatif/owner/teacher) geres par
+ * accessPasswordService.js. Chaque compte a un role ("owner" ou "teacher")
+ * qui determine ses droits, comme pour les mots de passe partages.
+ */
+export function listAdminUsers() {
   return getDb()
-    .prepare(`
-      SELECT id, email, password_hash, created_at, updated_at
-      FROM admin_users
-      WHERE email = ?
-    `)
-    .get(email);
+    .prepare(`SELECT ${adminUserSelectColumns} FROM admin_users ORDER BY created_at ASC`)
+    .all();
 }
 
-export function updateAdminPassword(email, passwordHash) {
+export function getAdminUserById(id) {
   return getDb()
-    .prepare(`
-      UPDATE admin_users
-      SET password_hash = @password_hash,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE email = @email
-    `)
-    .run({ email, password_hash: passwordHash });
+    .prepare(`SELECT ${adminUserSelectColumns} FROM admin_users WHERE id = ?`)
+    .get(id);
+}
+
+export function findAdminUserByIdentifier(identifier) {
+  return getDb()
+    .prepare(
+      `SELECT id, email AS identifier, password_hash AS passwordHash, role, created_at AS createdAt, updated_at AS updatedAt
+       FROM admin_users
+       WHERE email = ?`
+    )
+    .get(identifier);
+}
+
+export function countAdminUsersByRole(role) {
+  return getDb().prepare("SELECT COUNT(*) AS count FROM admin_users WHERE role = ?").get(role).count;
+}
+
+export function createAdminUser({ identifier, passwordHash, role }) {
+  const result = getDb()
+    .prepare(`INSERT INTO admin_users (email, password_hash, role) VALUES (@identifier, @passwordHash, @role)`)
+    .run({ identifier, passwordHash, role });
+  return getAdminUserById(result.lastInsertRowid);
+}
+
+export function updateAdminUserPasswordById(id, passwordHash) {
+  return getDb()
+    .prepare("UPDATE admin_users SET password_hash = @passwordHash, updated_at = CURRENT_TIMESTAMP WHERE id = @id")
+    .run({ id, passwordHash });
+}
+
+export function updateAdminUserRoleById(id, role) {
+  return getDb()
+    .prepare("UPDATE admin_users SET role = @role, updated_at = CURRENT_TIMESTAMP WHERE id = @id")
+    .run({ id, role });
+}
+
+export function deleteAdminUser(id) {
+  return getDb().prepare("DELETE FROM admin_users WHERE id = ?").run(id);
 }
 
 export function upsertDocument(document) {

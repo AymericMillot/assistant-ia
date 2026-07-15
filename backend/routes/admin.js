@@ -1,7 +1,12 @@
 import express from "express";
+import bcrypt from "bcrypt";
 import {
+  countAdminUsersByRole,
+  createAdminUser,
   createManualResource,
+  deleteAdminUser,
   deleteManualResource,
+  getAdminUserById,
   getDocumentById,
   getDocuments,
   getDocumentStats,
@@ -10,6 +15,7 @@ import {
   getTopQuestions,
   getUnansweredQuestions,
   insertAuditLogEntry,
+  listAdminUsers,
   listAuditLogEntries,
   listManualResourceScrapePages,
   purgeAllProjectData,
@@ -19,6 +25,8 @@ import {
   getSettingDecrypted,
   setSetting,
   setSettingEncrypted,
+  updateAdminUserPasswordById,
+  updateAdminUserRoleById,
   updateManualResource
 } from "../config/db.js";
 import { clearIndexationLogs, getRecentIndexationLogs, logger } from "../config/logger.js";
@@ -1223,14 +1231,22 @@ router.post("/models/recommend", (req, res, next) => {
 });
 
 router.get("/models", async (_req, res) => {
+  const embeddingModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text:latest");
+
   try {
     const models = await ollamaService.listVisibleModels();
+    // Le modele d'embedding est masque de "models" (usage interne, pas pour le chat) :
+    // on l'expose separement, avec la liste complete (non filtree), pour permettre
+    // d'en choisir un autre parmi tous les modeles installes.
+    const allModels = await ollamaService.listModels();
     res.json({
       activeModel: ollamaService.getActiveModel(),
       activeTextModel: ollamaService.getActiveModelByRole("text"),
       activeImageModel: ollamaService.getActiveModelByRole("image"),
       activeReasoningModel: ollamaService.getActiveModelByRole("reasoning"),
+      embeddingModel,
       models,
+      allModels,
       ollamaAvailable: true
     });
   } catch {
@@ -1241,7 +1257,9 @@ router.get("/models", async (_req, res) => {
       activeTextModel: ollamaService.getActiveModelByRole("text"),
       activeImageModel: ollamaService.getActiveModelByRole("image"),
       activeReasoningModel: ollamaService.getActiveModelByRole("reasoning"),
+      embeddingModel,
       models: [],
+      allModels: [],
       ollamaAvailable: false,
       message: "Le service Ollama est injoignable pour le moment."
     });
@@ -1307,6 +1325,71 @@ router.post("/models/activate", async (req, res, next) => {
       activeTextModel: ollamaService.getActiveModelByRole("text"),
       activeImageModel: ollamaService.getActiveModelByRole("image"),
       activeReasoningModel: ollamaService.getActiveModelByRole("reasoning")
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Le modele d'embedding n'est pas un "role" au meme titre que text/image/reasoning :
+// il n'est pas utilise pour generer des reponses mais pour indexer les documents,
+// et changer de modele change la dimension des vecteurs. Toute collection Chroma
+// existante devient donc incompatible et doit etre recalculee integralement.
+router.put("/models/embedding", requireRole("owner"), async (req, res, next) => {
+  try {
+    const modelName = ensureSafeIdentifier(req.body?.modelName, "Nom du modele d'embedding", { max: 120 });
+
+    const installedModels = await ollamaService.listModels().catch(() => null);
+    if (installedModels === null) {
+      return res.status(503).json({
+        message: "Le service Ollama est injoignable. Impossible de changer le modele d'embedding pour le moment."
+      });
+    }
+
+    const isInstalled = installedModels.some(
+      (model) => String(model.name || "").toLowerCase() === modelName.toLowerCase()
+    );
+    if (!isInstalled) {
+      return res.status(400).json({
+        message: "Ce modele n'est pas installe. Telechargez-le avant de l'utiliser pour l'indexation."
+      });
+    }
+
+    if (getIndexingStatus().isRunning) {
+      return res.status(409).json({
+        message: "Une indexation est en cours. Attendez sa fin avant de changer le modele d'embedding."
+      });
+    }
+
+    const previousModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text:latest");
+    if (previousModel === modelName) {
+      return res.json({
+        message: "Ce modele d'embedding est deja actif.",
+        embeddingModel: modelName,
+        clearedCollections: 0,
+        reindexQueued: false
+      });
+    }
+
+    markActivity();
+    setSetting("embeddingModel", modelName);
+
+    const { clearedCollections } = await clearAllIndexes();
+    resetAllDocumentIndexing();
+    const job = await enqueueFullReindex({ trigger: "embedding-model-change" });
+
+    logAudit(req, "model.embedding-change", {
+      targetType: "model",
+      targetId: modelName,
+      details: { previousModel, clearedCollections }
+    });
+
+    res.json({
+      message:
+        "Modele d'embedding mis a jour. Tous les documents vont etre reindexes automatiquement avec ce nouveau modele.",
+      embeddingModel: modelName,
+      clearedCollections,
+      reindexQueued: Boolean(job)
     });
   } catch (error) {
     next(error);
@@ -1819,6 +1902,135 @@ router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
     const page = req.query?.page ? parsePositiveInt(req.query.page, "Page") : 1;
     const pageSize = req.query?.pageSize ? parsePositiveInt(req.query.pageSize, "Taille de page") : 50;
     res.json(listAuditLogEntries({ page, pageSize }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+function ensureAdminRole(value) {
+  if (value === "owner" || value === "teacher") {
+    return value;
+  }
+  const error = new Error("Role invalide (owner ou teacher).");
+  error.statusCode = 400;
+  throw error;
+}
+
+function ensureAdminIdentifiant(value) {
+  const identifiant = ensureSafeText(value, "Identifiant", { min: 3, max: 120 });
+  if (!/^[\p{L}\p{N}._@-]+$/u.test(identifiant)) {
+    const error = new Error("Identifiant invalide (lettres, chiffres, . _ @ - uniquement).");
+    error.statusCode = 400;
+    throw error;
+  }
+  return identifiant;
+}
+
+function requireExistingAdminUser(id) {
+  const target = getAdminUserById(id);
+  if (!target) {
+    const error = new Error("Compte introuvable.");
+    error.statusCode = 404;
+    throw error;
+  }
+  return target;
+}
+
+// Comptes admin nommes (identifiant + mot de passe propres) : reserve au role
+// "owner", pour creer des acces distincts en plus des mots de passe partages
+// owner/teacher/rotatif geres ailleurs.
+router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
+  try {
+    res.json({ users: listAdminUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
+  try {
+    const identifiant = ensureAdminIdentifiant(req.body?.identifiant);
+    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 8, max: 256 });
+    const role = ensureAdminRole(req.body?.role);
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    let user;
+    try {
+      user = createAdminUser({ identifier: identifiant, passwordHash, role });
+    } catch (dbError) {
+      if (String(dbError?.code || "").includes("CONSTRAINT")) {
+        const error = new Error("Cet identifiant est deja utilise.");
+        error.statusCode = 409;
+        throw error;
+      }
+      throw dbError;
+    }
+
+    logAudit(req, "admin-users.create", {
+      targetType: "admin_user",
+      targetId: user.id,
+      details: { identifiant, role }
+    });
+    res.status(201).json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put("/admin-users/:id/password", requireRole("owner"), async (req, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, "Identifiant du compte");
+    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 8, max: 256 });
+    requireExistingAdminUser(id);
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    updateAdminUserPasswordById(id, passwordHash);
+    logAudit(req, "admin-users.reset-password", { targetType: "admin_user", targetId: id });
+    res.json({ message: "Mot de passe mis a jour." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put("/admin-users/:id/role", requireRole("owner"), (req, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, "Identifiant du compte");
+    const role = ensureAdminRole(req.body?.role);
+    const target = requireExistingAdminUser(id);
+
+    if (target.role === "owner" && role !== "owner" && countAdminUsersByRole("owner") <= 1) {
+      const error = new Error("Impossible de retirer le role du dernier compte proprietaire.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    updateAdminUserRoleById(id, role);
+    logAudit(req, "admin-users.update-role", { targetType: "admin_user", targetId: id, details: { role } });
+    res.json({ message: "Role mis a jour." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete("/admin-users/:id", requireRole("owner"), (req, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, "Identifiant du compte");
+    if (req.user.adminUserId === id) {
+      const error = new Error("Vous ne pouvez pas supprimer votre propre compte.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const target = requireExistingAdminUser(id);
+    if (target.role === "owner" && countAdminUsersByRole("owner") <= 1) {
+      const error = new Error("Impossible de supprimer le dernier compte proprietaire.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    deleteAdminUser(id);
+    logAudit(req, "admin-users.delete", { targetType: "admin_user", targetId: id });
+    res.json({ message: "Compte supprime." });
   } catch (error) {
     next(error);
   }

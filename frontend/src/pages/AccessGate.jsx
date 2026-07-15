@@ -13,6 +13,7 @@ export default function AccessGate({
   showBackButton = true
 }) {
   const navigate = useNavigate();
+  const [identifiant, setIdentifiant] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -30,7 +31,7 @@ export default function AccessGate({
     try {
       await fetchJson("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ password })
+        body: JSON.stringify(identifiant.trim() ? { identifiant: identifiant.trim(), password } : { password })
       });
       onAuthenticated();
     } catch (requestError) {
@@ -48,6 +49,18 @@ export default function AccessGate({
       </div>
 
       <form className="mt-5 space-y-4" onSubmit={handleSubmit}>
+        <label className="block text-sm font-medium text-slate-700">
+          Identifiant <span className="font-normal text-slate-400">(optionnel, pour un compte admin nomme)</span>
+          <input
+            type="text"
+            className="input mt-2"
+            value={identifiant}
+            onChange={(event) => setIdentifiant(event.target.value)}
+            placeholder="Laisser vide pour le mot de passe partage"
+            autoComplete="username"
+          />
+        </label>
+
         <label className="block text-sm font-medium text-slate-700">
           Mot de passe
           <input

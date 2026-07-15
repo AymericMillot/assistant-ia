@@ -179,9 +179,13 @@ ${intro_message}
 
 Scripts utiles :
 - Installer : ./install.sh
+- Mot de passe temporaire admin : ./password
 - Mettre a jour : ./update.sh
+- Voir la version installee : ./version.sh
 - Redemarrer : ./restart.sh
 - Arreter : ./stop.sh
+- Reinitialiser (efface tout, redemande la configuration) : ./reset.sh
+- Aide / documentation : ./help.sh
 
 EOF
 }

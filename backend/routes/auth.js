@@ -10,7 +10,7 @@ import {
   validateAccessPassword
 } from "../services/accessPasswordService.js";
 import { createRateLimiter, ensureSafeText } from "../utils/security.js";
-import { insertAuditLogEntry } from "../config/db.js";
+import { findAdminUserByIdentifier, insertAuditLogEntry } from "../config/db.js";
 
 const router = express.Router();
 const loginRateLimiter = createRateLimiter({
@@ -46,12 +46,39 @@ function cookieOptions(role) {
 
 router.post("/login", loginRateLimiter, async (req, res) => {
   const rawPassword = req.body?.password;
+  const rawIdentifiant = req.body?.identifiant;
   let password;
 
   try {
     password = ensureSafeText(rawPassword, "Mot de passe", { min: 3, max: 256 });
   } catch {
     return res.status(400).json({ message: "Mot de passe requis." });
+  }
+
+  // Compte admin nomme (identifiant + mot de passe propres) : prioritaire
+  // sur les mots de passe partages historiques quand un identifiant est fourni.
+  if (typeof rawIdentifiant === "string" && rawIdentifiant.trim()) {
+    const identifiant = rawIdentifiant.trim();
+    const adminUser = findAdminUserByIdentifier(identifiant);
+    const passwordMatches = adminUser ? await bcrypt.compare(password, adminUser.passwordHash) : false;
+
+    if (!adminUser || !passwordMatches) {
+      return res.status(401).json({ message: "Identifiant ou mot de passe invalide." });
+    }
+
+    const role = adminUser.role;
+    const expiresInSeconds = 7 * 24 * 60 * 60;
+    const token = jwt.sign(
+      { role, adminUserId: adminUser.id, identifiant: adminUser.identifier },
+      process.env.JWT_SECRET,
+      { expiresIn: expiresInSeconds }
+    );
+
+    res.cookie("token", token, cookieOptions(role));
+    return res.json({
+      user: { role, adminUserId: adminUser.id, identifiant: adminUser.identifier },
+      mustChangePassword: false
+    });
   }
 
   const role = validateAccessPassword(password);
@@ -91,7 +118,8 @@ router.get("/me", authMiddleware, async (req, res) => {
   res.json({
     user: {
       role: req.user.role,
-      adminUserId: req.user.adminUserId || "temporary-admin"
+      adminUserId: req.user.adminUserId || "temporary-admin",
+      identifiant: req.user.identifiant || null
     },
     mustChangePassword: req.user.role === "teacher" && isTeacherPasswordChangeRequired()
   });

@@ -21,6 +21,10 @@ export default function ModelManager({ onRefreshSummary }) {
   const [selectedImageModel, setSelectedImageModel] = useState("");
   const [activeReasoningModel, setActiveReasoningModel] = useState("");
   const [selectedReasoningModel, setSelectedReasoningModel] = useState("");
+  const [allModels, setAllModels] = useState([]);
+  const [embeddingModel, setEmbeddingModel] = useState("");
+  const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState("");
+  const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [newModel, setNewModel] = useState("");
   const [activeView, setActiveView] = useState("all");
@@ -69,6 +73,9 @@ export default function ModelManager({ onRefreshSummary }) {
       setSelectedImageModel(payload.activeImageModel || "");
       setActiveReasoningModel(payload.activeReasoningModel || "");
       setSelectedReasoningModel(payload.activeReasoningModel || "");
+      setAllModels(payload.allModels || payload.models || []);
+      setEmbeddingModel(payload.embeddingModel || "");
+      setSelectedEmbeddingModel(payload.embeddingModel || "");
     } catch (requestError) {
       setError(reportError("modeles:load", requestError));
     }
@@ -149,6 +156,45 @@ export default function ModelManager({ onRefreshSummary }) {
       setError(reportError("modeles:activate", requestError));
     } finally {
       setBusy(false);
+    }
+  }
+
+  function requestChangeEmbeddingModel() {
+    if (!selectedEmbeddingModel || selectedEmbeddingModel === embeddingModel) {
+      return;
+    }
+
+    setConfirmState({
+      variant: "danger",
+      title: `Utiliser « ${selectedEmbeddingModel} » comme modèle d'embedding ?`,
+      message:
+        "Ce modèle sert à indexer les documents (recherche), pas à répondre au chat. Changer de modèle d'embedding rend les index existants incompatibles : tous les documents seront automatiquement réindexés avec ce nouveau modèle, ce qui peut prendre du temps.",
+      confirmLabel: "Changer et réindexer",
+      onConfirm: async () => {
+        setConfirmState(null);
+        await changeEmbeddingModel(selectedEmbeddingModel);
+      }
+    });
+  }
+
+  async function changeEmbeddingModel(modelName) {
+    setEmbeddingBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const payload = await fetchJson("/api/admin/models/embedding", {
+        method: "PUT",
+        body: JSON.stringify({ modelName })
+      });
+      setEmbeddingModel(payload.embeddingModel);
+      setSelectedEmbeddingModel(payload.embeddingModel);
+      setMessage(payload.message);
+      onRefreshSummary();
+    } catch (requestError) {
+      setError(reportError("modeles:embedding", requestError));
+    } finally {
+      setEmbeddingBusy(false);
     }
   }
 
@@ -330,6 +376,44 @@ export default function ModelManager({ onRefreshSummary }) {
           optional
         />
       </div>
+
+      <section className="subpanel p-5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+            Modèle d&apos;embedding (indexation des documents)
+          </h3>
+          <InfoPopover label="À propos du modèle d'embedding">
+            Ce modèle transforme les documents en vecteurs pour la recherche (RAG) — il ne répond
+            pas dans le chat. N&apos;importe quel modèle Ollama installé peut être utilisé.
+            Changer de modèle réindexe automatiquement tous les documents (les vecteurs d&apos;un
+            ancien modèle ne sont pas compatibles avec un nouveau).
+          </InfoPopover>
+        </div>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Actif : <span className="font-semibold text-slate-700 dark:text-slate-200">{embeddingModel || "Non défini"}</span>
+        </p>
+
+        <div className="mt-4 flex flex-col gap-3 md:flex-row">
+          <select
+            className="input w-full md:flex-1"
+            value={selectedEmbeddingModel}
+            onChange={(event) => setSelectedEmbeddingModel(event.target.value)}
+          >
+            {allModels.map((model) => (
+              <option key={model.name} value={model.name}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="soft-button"
+            disabled={embeddingBusy || !selectedEmbeddingModel || selectedEmbeddingModel === embeddingModel}
+            onClick={requestChangeEmbeddingModel}
+          >
+            {embeddingBusy ? "Application..." : "Utiliser ce modèle"}
+          </button>
+        </div>
+      </section>
 
       {catalog.length > 0 ? (
         <section className="subpanel p-5">

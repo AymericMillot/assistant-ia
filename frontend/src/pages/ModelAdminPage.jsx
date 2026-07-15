@@ -11,6 +11,7 @@ import FeedbackManager from "./admin/FeedbackManager";
 import PerformanceManager from "./admin/PerformanceManager";
 import AnalyticsManager from "./admin/AnalyticsManager";
 import AuditLogManager from "./admin/AuditLogManager";
+import AdminUsersManager from "./admin/AdminUsersManager";
 import DeploymentManager from "./admin/DeploymentManager";
 import ManualResourceManager from "../components/ManualResourceManager";
 import SupportManager from "../components/SupportManager";
@@ -128,6 +129,13 @@ function TabIcon({ name }) {
           <path d="M5 3h9l5 5v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
         </svg>
       );
+    case "comptes-admin":
+      return (
+        <svg {...shared}>
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -148,6 +156,7 @@ const baseTabs = [
   { id: "mise-a-jour", label: "Mise à jour" }
 ];
 const ownerOnlyTabs = [
+  { id: "comptes-admin", label: "Comptes admin" },
   { id: "audit", label: "Audit" },
   { id: "export-deploiement", label: "Export et déploiement" }
 ];
@@ -344,6 +353,7 @@ export default function ModelAdminPage() {
       {activeTab === "performance" && <PerformanceManager />}
       {activeTab === "donnees" && <DataManager />}
       {activeTab === "mise-a-jour" && <UpdateManager />}
+      {activeTab === "comptes-admin" && userRole === "owner" && <AdminUsersManager />}
       {activeTab === "audit" && userRole === "owner" && <AuditLogManager />}
       {activeTab === "export-deploiement" && userRole === "owner" && <DeploymentManager />}
       <SupportManager />
