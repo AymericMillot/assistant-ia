@@ -1,0 +1,16 @@
+.env
+.DS_Store
+._*
+backend/node_modules
+frontend/node_modules
+updater/node_modules
+backend/data
+backend/logs
+backend/uploads
+frontend/dist
+export
+release
+.update-backups
+fablab-admin-cookie.txt
+.env.publish
+.claude

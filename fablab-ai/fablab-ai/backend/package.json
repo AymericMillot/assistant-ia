@@ -1,0 +1,48 @@
+{
+  "name": "fablab-ai-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "password:current": "node scripts/show-access-password.js",
+    "password:reset-teacher": "node scripts/reset-teacher-password.js",
+    "import:site": "node scripts/import-site-from-sitemap.js"
+  },
+  "dependencies": {
+    "@langchain/community": "^1.1.23",
+    "@langchain/core": "^1.1.32",
+    "@langchain/ollama": "^1.2.6",
+    "@langchain/textsplitters": "^1.0.1",
+    "adm-zip": "^0.5.16",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^11.10.0",
+    "bull": "^4.16.5",
+    "cheerio": "^1.2.0",
+    "chromadb": "^3.3.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "ioredis": "^5.8.1",
+    "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.12.0",
+    "mime-types": "^3.0.2",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^6.10.1",
+    "pdf-parse": "^2.4.5",
+    "socket.io": "^4.8.3",
+    "winston": "^3.18.3",
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true,
+    "better-sqlite3@11.10.0": true
+  }
+}
