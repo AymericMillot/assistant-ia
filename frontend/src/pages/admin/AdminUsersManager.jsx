@@ -6,8 +6,8 @@ import EmptyState from "../../components/ui/EmptyState";
 import StatusBadge from "../../components/ui/StatusBadge";
 
 const roleLabels = {
-  owner: "Administration",
-  teacher: "Enseignant"
+  administrator: "Administrateur",
+  referent: "Référent"
 };
 
 function generatePassword() {
@@ -26,7 +26,7 @@ export default function AdminUsersManager() {
 
   const [identifiant, setIdentifiant] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("teacher");
+  const [role, setRole] = useState("referent");
   const [creating, setCreating] = useState(false);
 
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
@@ -72,7 +72,7 @@ export default function AdminUsersManager() {
       setSuccess(`Compte "${identifiant}" créé.`);
       setIdentifiant("");
       setPassword("");
-      setRole("teacher");
+      setRole("referent");
       await loadUsers();
     } catch (requestError) {
       setError(reportError("admin-users-create", requestError));
@@ -180,8 +180,8 @@ export default function AdminUsersManager() {
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
             Rôle
             <select className="input mt-2" value={role} onChange={(event) => setRole(event.target.value)}>
-              <option value="teacher">Enseignant</option>
-              <option value="owner">Administration</option>
+              <option value="referent">Référent</option>
+              <option value="administrator">Administrateur</option>
             </select>
           </label>
 
@@ -240,7 +240,7 @@ export default function AdminUsersManager() {
                     <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                       {user.identifier}
                     </span>
-                    <StatusBadge tone={user.role === "owner" ? "info" : "success"}>
+                    <StatusBadge tone={user.role === "administrator" ? "info" : "success"}>
                       {roleLabels[user.role] || user.role}
                     </StatusBadge>
                     {user.id === currentUserId ? (
@@ -267,8 +267,8 @@ export default function AdminUsersManager() {
                     value={user.role}
                     onChange={(event) => handleRoleChange(user, event.target.value)}
                   >
-                    <option value="teacher">Enseignant</option>
-                    <option value="owner">Administration</option>
+                    <option value="referent">Référent</option>
+                    <option value="administrator">Administrateur</option>
                   </select>
                   <button
                     className="ghost-button px-3 py-1.5 text-xs"

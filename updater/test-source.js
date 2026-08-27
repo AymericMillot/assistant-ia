@@ -81,8 +81,58 @@ async function main() {
   const config = JSON.parse(await fs.readFile(updateConfigPath, "utf8"));
   const server = config.server || {};
 
-  if (String(server.type || "http").toLowerCase() !== "http") {
-    throw new Error("Le mode HTTP n'est pas active dans update.config.json.");
+  if (String(server.type || "http").toLowerCase() === "github-releases") {
+    const repository = String(server.repository || "").trim();
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+      throw new Error("Le dépôt GitHub de mise à jour est invalide.");
+    }
+
+    const response = await fetch(`https://api.github.com/repos/${repository}/releases/latest`, {
+      headers: { Accept: "application/vnd.github+json" }
+    });
+    if (!response.ok) {
+      throw new Error(`Impossible de récupérer la dernière release GitHub (${response.status}).`);
+    }
+
+    const release = await response.json();
+    const version = String(release.tag_name || "").replace(/^v/i, "");
+    if (!isVersionFolderName(version)) {
+      throw new Error("Le tag de la dernière release GitHub est invalide.");
+    }
+    const manifestName = String(server.manifestFileTemplate || "fablab-ai-v{version}.manifest.json").replace(
+      /\{version\}/g,
+      version
+    );
+    const manifestAsset = (release.assets || []).find((asset) => asset.name === manifestName);
+    if (!manifestAsset?.browser_download_url) {
+      throw new Error("Le manifest de vérification est absent de la dernière release GitHub.");
+    }
+    const manifestResponse = await fetch(manifestAsset.browser_download_url);
+    if (!manifestResponse.ok) {
+      throw new Error(`Impossible de télécharger le manifest (${manifestResponse.status}).`);
+    }
+    const manifest = await manifestResponse.json();
+    const packageName = String(manifest.packageFile || resolvePackageFileName(server, version));
+    const packageAsset = (release.assets || []).find((asset) => asset.name === packageName);
+    if (!packageAsset?.browser_download_url) {
+      throw new Error("L'archive de la dernière release GitHub est absente.");
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fablab-update-test-"));
+    const archivePath = path.join(tempDir, "release.tar.gz");
+    const archiveResponse = await fetch(packageAsset.browser_download_url);
+    if (!archiveResponse.ok || !archiveResponse.body) {
+      throw new Error(`Téléchargement impossible (${archiveResponse.status}).`);
+    }
+    await fs.writeFile(archivePath, Buffer.from(await archiveResponse.arrayBuffer()));
+    const sha256 = await sha256OfFile(archivePath);
+    await fs.rm(tempDir, { recursive: true, force: true });
+    if (sha256.toLowerCase() !== String(manifest.sha256 || "").toLowerCase()) {
+      throw new Error("Le SHA256 de l'archive GitHub ne correspond pas au manifest.");
+    }
+
+    console.log(JSON.stringify({ ok: true, version, packageSource: packageAsset.browser_download_url, sha256 }, null, 2));
+    return;
   }
 
   const baseUrl = String(server.baseUrl || "").replace(/\/+$/, "");

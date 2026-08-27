@@ -1400,7 +1400,7 @@ router.post("/models/activate", async (req, res, next) => {
 // il n'est pas utilise pour generer des reponses mais pour indexer les documents,
 // et changer de modele change la dimension des vecteurs. Toute collection Chroma
 // existante devient donc incompatible et doit etre recalculee integralement.
-router.put("/models/embedding", requireRole("owner"), async (req, res, next) => {
+router.put("/models/embedding", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const modelName = ensureSafeIdentifier(req.body?.modelName, "Nom du modele d'embedding", { max: 120 });
 
@@ -1574,7 +1574,7 @@ router.get("/update/status", async (_req, res, next) => {
   }
 });
 
-router.get("/update/backups", requireRole("owner"), async (_req, res, next) => {
+router.get("/update/backups", requireRole(["administrator", "owner"]), async (_req, res, next) => {
   try {
     const payload = await updateService.getUpdateBackups();
     res.json(payload);
@@ -1596,7 +1596,7 @@ router.get("/update/backups", requireRole("owner"), async (_req, res, next) => {
   }
 });
 
-router.post("/update/apply", requireRole("owner"), async (req, res, next) => {
+router.post("/update/apply", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     markActivity();
     const targetVersionRaw = String(req.body?.targetVersion || "").trim();
@@ -1616,7 +1616,7 @@ router.post("/update/apply", requireRole("owner"), async (req, res, next) => {
   }
 });
 
-router.post("/update/rollback", requireRole("owner"), async (req, res, next) => {
+router.post("/update/rollback", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     markActivity();
     const backupId = ensureSafeIdentifier(req.body?.backupId, "Sauvegarde", { max: 80 });
@@ -1634,7 +1634,7 @@ router.post("/update/rollback", requireRole("owner"), async (req, res, next) => 
 });
 
 // Export et déploiement.
-router.get("/deployment/ftp-config", requireRole("owner"), (_req, res) => {
+router.get("/deployment/ftp-config", requireRole(["administrator", "owner"]), (_req, res) => {
   const host = getSetting("deployFtpHost", "");
   const remoteDir = getSetting("deployFtpRemoteDir", "");
   const publicBaseUrl = getSetting("deployPublicBaseUrl", "");
@@ -1652,7 +1652,7 @@ router.get("/deployment/ftp-config", requireRole("owner"), (_req, res) => {
   });
 });
 
-router.put("/deployment/ftp-config", requireRole("owner"), (req, res, next) => {
+router.put("/deployment/ftp-config", requireRole(["administrator", "owner"]), (req, res, next) => {
   try {
     if (!isSecretsEncryptionAvailable()) {
       return res.status(400).json({
@@ -1694,7 +1694,7 @@ router.put("/deployment/ftp-config", requireRole("owner"), (req, res, next) => {
   }
 });
 
-router.get("/deployment/status", requireRole("owner"), async (_req, res, next) => {
+router.get("/deployment/status", requireRole(["administrator", "owner"]), async (_req, res, next) => {
   try {
     const payload = await updateService.getDeploymentStatus();
     res.json(payload);
@@ -1708,7 +1708,7 @@ router.get("/deployment/status", requireRole("owner"), async (_req, res, next) =
   }
 });
 
-router.post("/deployment/publish", requireRole("owner"), async (req, res, next) => {
+router.post("/deployment/publish", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const version = req.body?.version
       ? ensureSafeIdentifier(req.body.version, "Version", { max: 40 })
@@ -1962,7 +1962,7 @@ router.get("/analytics/unanswered-questions", async (req, res, next) => {
 });
 
 // Journal d'audit.
-router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
+router.get("/audit-log", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const page = req.query?.page ? parsePositiveInt(req.query.page, "Page") : 1;
     const pageSize = req.query?.pageSize ? parsePositiveInt(req.query.pageSize, "Taille de page") : 50;
@@ -1973,7 +1973,7 @@ router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
 });
 
 function ensureAdminRole(value) {
-  if (value === "owner" || value === "teacher") {
+  if (value === "referent" || value === "administrator") {
     return value;
   }
   const error = new Error("Rôle de compte invalide.");
@@ -2003,7 +2003,7 @@ function requireExistingAdminUser(id) {
 
 // Comptes admin nommes (identifiant + mot de passe propres) : reserve au role
 // Gestion des comptes nommés.
-router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
+router.get("/admin-users", requireRole(["administrator", "owner"]), (_req, res, next) => {
   try {
     res.json({ users: listAdminUsers() });
   } catch (error) {
@@ -2011,7 +2011,7 @@ router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
   }
 });
 
-router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
+router.post("/admin-users", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const identifiant = ensureAdminIdentifiant(req.body?.identifiant);
     const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 12, max: 256 });
@@ -2041,7 +2041,7 @@ router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
   }
 });
 
-router.put("/admin-users/:id/password", requireRole("owner"), async (req, res, next) => {
+router.put("/admin-users/:id/password", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, "Identifiant du compte");
     const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 12, max: 256 });
@@ -2056,13 +2056,13 @@ router.put("/admin-users/:id/password", requireRole("owner"), async (req, res, n
   }
 });
 
-router.put("/admin-users/:id/role", requireRole("owner"), (req, res, next) => {
+router.put("/admin-users/:id/role", requireRole(["administrator", "owner"]), (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, "Identifiant du compte");
     const role = ensureAdminRole(req.body?.role);
     const target = requireExistingAdminUser(id);
 
-    if (target.role === "owner" && role !== "owner" && countAdminUsersByRole("owner") <= 1) {
+    if (target.role === "administrator" && role !== "administrator" && countAdminUsersByRole("administrator") <= 1) {
       const error = new Error("Impossible de retirer le rôle du dernier compte principal.");
       error.statusCode = 400;
       throw error;
@@ -2076,7 +2076,7 @@ router.put("/admin-users/:id/role", requireRole("owner"), (req, res, next) => {
   }
 });
 
-router.delete("/admin-users/:id", requireRole("owner"), (req, res, next) => {
+router.delete("/admin-users/:id", requireRole(["administrator", "owner"]), (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, "Identifiant du compte");
     if (req.user.adminUserId === id) {
@@ -2086,7 +2086,7 @@ router.delete("/admin-users/:id", requireRole("owner"), (req, res, next) => {
     }
 
     const target = requireExistingAdminUser(id);
-    if (target.role === "owner" && countAdminUsersByRole("owner") <= 1) {
+    if (target.role === "administrator" && countAdminUsersByRole("administrator") <= 1) {
       const error = new Error("Impossible de supprimer le dernier compte principal.");
       error.statusCode = 400;
       throw error;

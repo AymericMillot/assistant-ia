@@ -98,7 +98,6 @@ fablab-ai/
 ├── update.sh
 ├── restart.sh
 ├── stop.sh
-├── password.sh
 ├── README.md
 ├── backend/
 └── frontend/
@@ -174,8 +173,7 @@ Le script prepare automatiquement le projet :
 6. lance les services Docker necessaires et attend qu'Ollama soit pret
 7. telecharge le modele principal choisi (ou par defaut) et le modele d'embedding
 8. demarre toute la plateforme
-9. genere et affiche le mot de passe enseignant initial (changement impose a la premiere
-   connexion)
+9. genere et affiche les identifiants du compte administrateur initial
 
 Une fois termine, tu peux ouvrir :
 
@@ -285,14 +283,10 @@ Ce script :
 - tente d'arreter les indexations
 - arrete ensuite toute la plateforme Docker
 
-## Comment récupérer les accès admin
+## Gestion des comptes d'administration
 
-Pour afficher le mot de passe administratif temporaire :
-
-```bash
-cd "/chemin/vers/fablab-ai"
-./password.sh
-```
+Le compte administrateur initial est affiché à la fin de la première installation. Il permet de
+créer ensuite des comptes Référent et Administrateur depuis l'onglet « Comptes admin ».
 
 ## Comment utiliser le projet
 
@@ -468,12 +462,6 @@ docker compose down
 docker compose logs -f backend
 ```
 
-### Reafficher le mot de passe admin
-
-```bash
-./password.sh
-```
-
 ## Si quelque chose ne marche pas
 
 Verifie dans cet ordre :
@@ -500,7 +488,6 @@ Pour un debutant, la procedure la plus simple est :
 cd "/chemin/vers/fablab-ai"
 chmod +x install.sh
 ./install.sh
-./password.sh
 ```
 
 Puis :
@@ -545,6 +532,8 @@ ou avec `./update.sh`. Chaque installation :
 ## Documentation complémentaire
 
 - [docs/INSTALL.md](docs/INSTALL.md) — installation détaillée, dépannage, déploiement distant
+- [docs/ROLES.md](docs/ROLES.md) — droits des utilisateurs, référents et administrateurs
+- [docs/GITHUB_RELEASES.md](docs/GITHUB_RELEASES.md) — publication et vérification des mises à jour
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — variables d'environnement, branding, secrets
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribuer au projet
 - [SECURITY.md](SECURITY.md) — signaler une vulnérabilité

@@ -467,19 +467,19 @@
         <h3>Installation</h3>
         <pre><code>cd fablab-ai
 ./install.sh</code></pre>
-        <p>Le script installe Docker si besoin, construit les images, télécharge un modèle d'IA adapté à la machine, démarre tous les services, puis génère un mot de passe enseignant initial.</p>
+        <p>Le script installe Docker si besoin, construit les images, télécharge un modèle d'IA adapté à la machine, démarre tous les services, puis crée le compte administrateur initial.</p>
 
         <h3>Premier accès</h3>
         <ul>
           <li><strong>Utilisateurs</strong> : <code>http://&lt;adresse-du-serveur&gt;:3000</code></li>
           <li><strong>Administration</strong> : <code>http://&lt;adresse-du-serveur&gt;:3000/admin</code></li>
-          <li>Mot de passe temporaire (valable une heure, en secours) : lancez <code>./password.sh</code> sur le serveur.</li>
+          <li>Les identifiants du compte administrateur initial sont affichés une seule fois à la fin de l'installation.</li>
         </ul>
       </section>
 
       <section class="card" id="quotidien" data-searchable>
         <h2>💬 Utilisation au quotidien</h2>
-        <p class="lead">Ce que voient les utilisateurs et ce que gèrent les enseignants.</p>
+        <p class="lead">Ce que voient les utilisateurs et ce que gèrent les comptes d'administration.</p>
         <ul>
           <li>La page d'accueil permet de poser une question en langage naturel ; l'assistant répond en s'appuyant sur les documents indexés.</li>
           <li>Les échanges ne sont pas conservés après fermeture de la page (confidentialité).</li>
@@ -501,7 +501,6 @@
             <tr><td><code>./update.sh</code></td><td>Vérifie et applique une mise à jour distante, ou reconstruit depuis les fichiers locaux.</td></tr>
             <tr><td><code>./version.sh</code></td><td>Affiche la version installée et si une mise à jour est disponible.</td></tr>
             <tr><td><code>./reset.sh</code></td><td>Réinitialise entièrement l'instance (données + paramètres).</td></tr>
-            <tr><td><code>./password.sh</code></td><td>Affiche le mot de passe temporaire courant (valable une heure).</td></tr>
             <tr><td><code>./export.sh</code></td><td>Crée une archive versionnée du projet, prête à déployer ailleurs.</td></tr>
             <tr><td><code>./help.sh</code></td><td>Ouvre cette page d'aide.</td></tr>
           </tbody>

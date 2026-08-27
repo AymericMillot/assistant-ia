@@ -1,85 +1,11 @@
-import crypto from "crypto";
 import bcrypt from "bcrypt";
-import {
-  findAdminUserByIdentifier,
-  getSetting,
-  setSetting,
-  updateAdminUserPasswordById
-} from "../config/db.js";
-
-const defaultTimeZone = process.env.ACCESS_PASSWORD_TIMEZONE || "Europe/Paris";
-
-function getDateParts(date = new Date(), timeZone = defaultTimeZone) {
-  const formatter = new Intl.DateTimeFormat("fr-FR", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  });
-
-  const parts = formatter.formatToParts(date).reduce((accumulator, part) => {
-    if (part.type !== "literal") {
-      accumulator[part.type] = part.value;
-    }
-    return accumulator;
-  }, {});
-
-  return {
-    year: parts.year,
-    month: parts.month,
-    day: parts.day,
-    hour: parts.hour,
-    minute: parts.minute,
-    second: parts.second
-  };
-}
-
-function buildHourKey(date = new Date(), timeZone = defaultTimeZone) {
-  const { year, month, day, hour } = getDateParts(date, timeZone);
-  return `${year}${month}${day}${hour}`;
-}
-
-function buildDisplayHour(date = new Date(), timeZone = defaultTimeZone) {
-  const { day, month, year, hour } = getDateParts(date, timeZone);
-  return `${day}/${month}/${year} ${hour}:00`;
-}
-
-function baseSecret() {
-  return process.env.APP_PASSWORD_SEED || process.env.JWT_SECRET || "fablab-ai-default-seed";
-}
-
-export function generateAccessPassword(date = new Date(), timeZone = defaultTimeZone) {
-  const hourKey = buildHourKey(date, timeZone);
-  const digest = crypto
-    .createHmac("sha256", baseSecret())
-    .update(`fablab-ai-access:${hourKey}`)
-    .digest("base64url")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
-
-  const compact = digest.slice(0, 40);
-  return [
-    compact.slice(0, 4),
-    compact.slice(4, 8),
-    compact.slice(8, 12),
-    compact.slice(12, 16),
-    compact.slice(16, 20),
-    compact.slice(20, 24),
-    compact.slice(24, 28),
-    compact.slice(28, 32),
-    compact.slice(32, 36),
-    compact.slice(36, 40)
-  ].join("-");
-}
+import crypto from "crypto";
+import { getSetting, setSetting } from "../config/db.js";
 
 /**
  * Les mots de passe de comptes sont stockés en base avec bcrypt. La
  * configuration locale peut être resynchronisée depuis la valeur de
- * l'instance ; le mot de passe enseignant reste modifiable sans redéployer.
+ * l'instance ; le mot de passe référent reste modifiable sans redéployer.
  */
 export function getOwnerPasswordHash() {
   return String(getSetting("ownerPasswordHash", "") || "").trim();
@@ -97,7 +23,7 @@ export function setOwnerPasswordHash(hash) {
 export async function synchronizeOwnerBootstrapPassword(password = process.env.OWNER_BOOTSTRAP_PASSWORD) {
   const rawPassword = String(password || "").trim();
   if (!rawPassword) {
-    return { synchronized: false, namedAccountUpdated: false };
+    return { synchronized: false };
   }
 
   if (rawPassword.length < 16 || rawPassword.length > 256) {
@@ -107,14 +33,7 @@ export async function synchronizeOwnerBootstrapPassword(password = process.env.O
   const hash = await bcrypt.hash(rawPassword, 12);
   setOwnerPasswordHash(hash);
 
-  const initialIdentifier = process.env.ADMIN_EMAIL || "admin@fablab.local";
-  const initialAdmin = findAdminUserByIdentifier(initialIdentifier);
-  const namedAccountUpdated = Boolean(initialAdmin && initialAdmin.role === "owner");
-  if (namedAccountUpdated) {
-    updateAdminUserPasswordById(initialAdmin.id, hash);
-  }
-
-  return { synchronized: true, namedAccountUpdated };
+  return { synchronized: true };
 }
 
 export function getTeacherPasswordHash() {
@@ -141,7 +60,7 @@ function generateRandomPassword(length = 16) {
 }
 
 /**
- * Genere un nouveau mot de passe enseignant aleatoire, le stocke (bcrypt) et
+ * Genere un nouveau mot de passe référent aleatoire, le stocke (bcrypt) et
  * impose son changement a la prochaine connexion. Utilise en fin d'installation
  * et par le script reset-teacher-password.js. Le mot de passe en clair n'est
  * jamais stocke : il doit etre communique immediatement a l'appelant.
@@ -157,26 +76,15 @@ export async function generateAndSetTeacherPassword() {
 /**
  * Valide un mot de passe d'accès admin et renvoie le rôle associé :
  * - rôle système : accès aux opérations d'administration avancées
- * - "teacher" : mot de passe permanent enseignant (accès admin sauf export/déploiement)
- * - "app" : mot de passe rotatif horaire (accès admin générique sauf export/déploiement)
+ * - "referent" : accès aux fonctions d'administration courantes
  * - null si aucune correspondance
  */
-export function validateAccessPassword(password, date = new Date(), timeZone = defaultTimeZone) {
+export function validateAccessPassword(password) {
   if (!password) {
     return null;
   }
 
   const rawPassword = password.trim();
-  const normalizedPassword = rawPassword.toUpperCase();
-  const oneHourMs = 60 * 60 * 1000;
-
-  const matchesRotatingPassword = [date, new Date(date.getTime() - oneHourMs), new Date(date.getTime() + oneHourMs)].some(
-    (candidateDate) => normalizedPassword === generateAccessPassword(candidateDate, timeZone)
-  );
-
-  if (matchesRotatingPassword) {
-    return "app";
-  }
 
   const ownerHash = getOwnerPasswordHash();
   if (ownerHash) {
@@ -193,7 +101,7 @@ export function validateAccessPassword(password, date = new Date(), timeZone = d
   if (teacherHash) {
     try {
       if (bcrypt.compareSync(rawPassword, teacherHash)) {
-        return "teacher";
+        return "referent";
       }
     } catch {
       // Hash invalide en base : aucune correspondance.
@@ -201,22 +109,4 @@ export function validateAccessPassword(password, date = new Date(), timeZone = d
   }
 
   return null;
-}
-
-export function getAccessPasswordSnapshot(date = new Date(), timeZone = defaultTimeZone) {
-  const nextHourDate = new Date(date.getTime() + getMsUntilNextRotation(date, timeZone));
-
-  return {
-    password: generateAccessPassword(date, timeZone),
-    validFromLabel: buildDisplayHour(date, timeZone),
-    validUntilDate: nextHourDate,
-    timeZone
-  };
-}
-
-export function getMsUntilNextRotation(date = new Date(), timeZone = defaultTimeZone) {
-  const { minute, second } = getDateParts(date, timeZone);
-  const currentSeconds = Number(minute) * 60 + Number(second);
-  const remainingSeconds = Math.max(1, 3600 - currentSeconds);
-  return remainingSeconds * 1000;
 }

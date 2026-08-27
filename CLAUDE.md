@@ -18,13 +18,11 @@ docker compose logs -f backend   # Stream backend logs
 ### Password management
 
 ```bash
-./password.sh                                     # Show current rotating admin password
-cd backend && npm run password:current         # Same via npm script
-cd backend && npm run password:reset-teacher   # Generate a new teacher password (forces change at next login)
+cd backend && npm run password:reset-teacher   # Generate a referent password (forces change at next login)
 ```
 
-Owner and teacher permanent passwords are bcrypt hashes stored in DB settings (not env vars) —
-set from the admin UI, or via `PUT /api/auth/teacher-password` (owner-only).
+Account passwords are stored with bcrypt hashes. Create and manage named accounts from the
+administration interface.
 
 ### Frontend development
 
@@ -55,10 +53,8 @@ The project is a local RAG-based AI assistant, generic and configurable for any 
 
 ### Authentication
 
-Admin password uses three mechanisms in `accessPasswordService.js`, each returning a distinct role:
-- **Rotating password** (`app` role): HMAC-SHA256 of `APP_PASSWORD_SEED` + current hour key, changes every hour
-- **Owner password** (`owner` role): bcrypt hash stored in DB settings (`ownerPasswordHash`)
-- **Teacher password** (`teacher` role): bcrypt hash stored in DB settings (`teacherPasswordHash`); can be auto-generated (`generateAndSetTeacherPassword()`, used by `backend/scripts/reset-teacher-password.js` and at install time) which also sets a `teacherPasswordMustChange` flag — the next teacher login returns `mustChangePassword: true` and the frontend (`App.jsx`) blocks access to the admin until `PUT /api/auth/teacher-password/self` is called
+Named accounts use bcrypt hashes. The referent password can be auto-generated at install time;
+the next referent login then requires a password change before using the administration area.
 
 JWT is issued on login (cookie `token`, httpOnly), validated by `authMiddleware.js` on all `/api/admin/*` routes.
 
@@ -92,7 +88,6 @@ React SPA with `react-router-dom`. Routes: `/` (UserChat), `/admin` (ModelAdminP
 
 | Variable | Purpose |
 |---|---|
-| `APP_PASSWORD_SEED` | Seed for rotating hourly password |
 | `JWT_SECRET` | Signs session JWTs |
 | `CONFIG_ENCRYPTION_KEY` | AES-256-GCM key encrypting sensitive DB settings (e.g. deployment FTP credentials) — see `backend/utils/secretsCrypto.js` |
 | `ADMIN_ACCESS_MODE` | `any` (default) or `local` (restrict admin to local network) |

@@ -299,6 +299,77 @@ function resolvePackageFileName(serverConfig, version) {
   return packageFile || `fablab-ai-v${version}.tar.gz`;
 }
 
+function normalizeGithubReleaseVersion(tagName) {
+  return String(tagName || "").trim().replace(/^v/i, "");
+}
+
+function findGithubAsset(assets, expectedName) {
+  return (Array.isArray(assets) ? assets : []).find((asset) => asset?.name === expectedName) || null;
+}
+
+async function fetchGithubReleases(serverConfig, headers = {}) {
+  const repository = String(serverConfig?.repository || "").trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error("Le dépôt GitHub de mise à jour est invalide.");
+  }
+
+  const apiBaseUrl = String(serverConfig?.apiBaseUrl || "https://api.github.com").replace(/\/+$/, "");
+  const response = await fetchWithTimeout(`${apiBaseUrl}/repos/${repository}/releases?per_page=100`, {
+    headers: { Accept: "application/vnd.github+json", ...headers }
+  });
+  if (!response.ok) {
+    throw new Error(`Impossible de récupérer les releases GitHub (${response.status}).`);
+  }
+
+  const payload = await response.json();
+  const releases = await Promise.all(
+    (Array.isArray(payload) ? payload : [])
+      .filter((release) => !release?.draft && !release?.prerelease)
+      .map(async (release) => {
+        const version = normalizeGithubReleaseVersion(release.tag_name);
+        if (!isVersionFolderName(version)) {
+          return null;
+        }
+        const manifestName = String(serverConfig?.manifestFileTemplate || "fablab-ai-v{version}.manifest.json").replace(
+          /\{version\}/g,
+          version
+        );
+        const manifestAsset = findGithubAsset(release.assets, manifestName);
+        if (!manifestAsset?.browser_download_url) {
+          return null;
+        }
+        const manifest = await tryFetchJson(manifestAsset.browser_download_url, headers, null);
+        if (!manifest || String(manifest.version || "") !== version) {
+          return null;
+        }
+        const packageName = String(manifest.packageFile || resolvePackageFileName(serverConfig, version));
+        const packageAsset = findGithubAsset(release.assets, packageName);
+        if (!packageAsset?.browser_download_url) {
+          return null;
+        }
+        const notesAsset = findGithubAsset(release.assets, `fablab-ai-v${version}.notes.md`);
+        const notes = notesAsset?.browser_download_url
+          ? (await tryFetchText(notesAsset.browser_download_url, headers)).trim()
+          : String(release.body || "").trim();
+        return {
+          version,
+          packageUrl: packageAsset.browser_download_url,
+          notes,
+          notesUrl: notesAsset?.browser_download_url || release.html_url || "",
+          releaseUrl: release.html_url || String(serverConfig?.latestReleaseUrl || ""),
+          sha256: String(manifest.sha256 || "").toLowerCase(),
+          publishedAt: release.published_at || manifest.publishedAt || ""
+        };
+      })
+  );
+
+  const validReleases = dedupeReleasesByVersion(releases.filter(Boolean));
+  if (validReleases.length === 0) {
+    throw new Error("Aucune release GitHub complète et vérifiable n'est disponible.");
+  }
+  return validReleases;
+}
+
 async function tryFetchText(url, headers = {}) {
   try {
     const response = await fetchWithTimeout(url, { headers });
@@ -343,13 +414,15 @@ async function tryFetchJson(url, headers = {}, fallbackValue = null) {
 
 async function fetchRemoteReleases() {
   const config = await readUpdateConfig();
+  const headers = config.server.headers || {};
+  const releaseLayout = String(config.server.releaseLayout || "").trim().toLowerCase();
+  if (releaseLayout === "github-releases" || config.server.type === "github-releases") {
+    return { releases: await fetchGithubReleases(config.server, headers), config };
+  }
   if (!config.server?.baseUrl) {
     throw new Error("Aucune URL de base n'est configurée dans update.config.json.");
   }
-
-  const headers = config.server.headers || {};
   const baseUrl = String(config.server.baseUrl || "").replace(/\/+$/, "");
-  const releaseLayout = String(config.server.releaseLayout || "").trim().toLowerCase();
 
   if (releaseLayout === "version-directories") {
     const response = await fetchWithTimeout(`${baseUrl}/`, { headers });
@@ -1031,6 +1104,8 @@ function invalidateRemoteReleaseCache() {
 
 async function buildStatus() {
   const currentVersion = await readVersion();
+  const updateConfig = await readUpdateConfig();
+  const latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
   setState({ currentVersion });
   await pruneOldBackups();
   const backups = await listBackups();
@@ -1052,6 +1127,7 @@ async function buildStatus() {
       latestVersion,
       updateAvailable,
       release,
+      latestReleaseUrl,
       retention: maxBackupVersions,
       backups: visibleBackups.map((backup) => ({
         id: backup.id,
@@ -1077,6 +1153,7 @@ async function buildStatus() {
       latestVersion: currentVersion,
       updateAvailable: false,
       release: null,
+      latestReleaseUrl,
       retention: maxBackupVersions,
       backups: visibleBackups.map((backup) => ({
         id: backup.id,

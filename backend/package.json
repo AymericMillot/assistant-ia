@@ -9,7 +9,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "password:current": "node scripts/show-access-password.js",
     "password:reset-teacher": "node scripts/reset-teacher-password.js",
     "import:site": "node scripts/import-site-from-sitemap.js"
   },
@@ -20,30 +19,30 @@
     "@langchain/textsplitters": "^1.0.1",
     "adm-zip": "^0.6.0",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "bull": "^4.16.5",
     "cheerio": "^1.2.0",
     "chromadb": "^3.5.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
-    "dotenv": "^16.6.1",
+    "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
-    "ioredis": "^5.11.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "mammoth": "^1.12.1",
     "mime-types": "^3.0.2",
     "multer": "^2.2.0",
-    "node-cron": "^4.2.1",
+    "node-cron": "^4.6.0",
     "nodemailer": "^9.0.5",
     "pdf-parse": "^2.4.5",
     "socket.io": "^4.8.3",
     "winston": "^3.19.0",
-    "zod": "^3.25.76"
+    "zod": "^4.4.3"
   },
   "allowScripts": {
     "bcrypt@6.0.0": true,
-    "better-sqlite3@12.11.1": true
+    "better-sqlite3@13.0.3": true
   },
   "overrides": {
     "uuid": "^11.1.1"

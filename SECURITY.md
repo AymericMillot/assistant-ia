@@ -21,7 +21,6 @@ fois le problème confirmé, avec crédit au rapporteur si souhaité.
 - Mots de passe de comptes stockés en bcrypt dans la base.
 - Secrets locaux conservés uniquement dans le fichier `.env` local (mode `600`) et jamais
   inclus dans les exports.
-- Mot de passe d'accès rotatif horaire dérivé de `APP_PASSWORD_SEED` (jamais stocké tel quel).
 - Secrets sensibles (identifiants FTP de déploiement, etc.) chiffrés au repos en base
   (AES-256-GCM) via `CONFIG_ENCRYPTION_KEY` plutôt que stockés en clair dans `.env`.
 - Protection SSRF sur le scraping de liens documentaires (adresses privées/locales refusées par
@@ -31,11 +30,11 @@ fois le problème confirmé, avec crédit au rapporteur si souhaité.
 
 ## Ce qui reste sous votre responsabilité en déploiement
 
-- Générer des valeurs uniques et privées pour `JWT_SECRET`, `APP_PASSWORD_SEED` et
-  `CONFIG_ENCRYPTION_KEY` (ne jamais réutiliser les exemples de `.env.example`).
+- Générer des valeurs uniques et privées pour `JWT_SECRET` et `CONFIG_ENCRYPTION_KEY` (ne jamais
+  réutiliser les exemples de `.env.example`).
 - Protéger le fichier `.env`, faire tourner tout secret compromis et lancer `./doctor.sh --yes`
   après une réparation de configuration.
-- Changer le mot de passe enseignant généré automatiquement à la première connexion (imposé par
+- Changer le mot de passe référent généré automatiquement à la première connexion (imposé par
   l'application, mais à ne pas contourner).
 - Restreindre l'accès réseau au strict nécessaire (le port applicatif uniquement ; Ollama,
   ChromaDB et Redis ne doivent pas être exposés publiquement).

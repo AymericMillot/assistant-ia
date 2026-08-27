@@ -81,6 +81,8 @@ export default function UpdateManager() {
     (Boolean(latestVersion) &&
       Boolean(status?.currentVersion) &&
       compareVersions(latestVersion, status.currentVersion) > 0);
+  const latestReleaseUrl =
+    releases[0]?.releaseUrl || status?.release?.releaseUrl || status?.latestReleaseUrl || "";
 
   const buttonClassName = useMemo(() => {
     if (busy) {
@@ -330,6 +332,16 @@ export default function UpdateManager() {
             <p className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
               {latestVersion || status?.currentVersion || "1.000"}
             </p>
+            {latestReleaseUrl ? (
+              <a
+                className="mt-2 inline-block text-sm font-medium text-sky-700 underline underline-offset-2 dark:text-sky-300"
+                href={latestReleaseUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Voir la version sur GitHub
+              </a>
+            ) : null}
           </article>
           <article className="rounded-[24px] border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">

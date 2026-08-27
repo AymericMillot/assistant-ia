@@ -133,21 +133,40 @@ install_requested_version() {
     exit 1
   fi
 
-  local base_url version_file_name package_template
+  local update_type base_url version_file_name package_template repository manifest_template
+  update_type="$(json_string_field_from_file "$update_config_file" "type")"
   base_url="$(json_string_field_from_file "$update_config_file" "baseUrl")"
   version_file_name="$(json_string_field_from_file "$update_config_file" "versionFile")"
   package_template="$(json_string_field_from_file "$update_config_file" "packageFileTemplate")"
+  repository="$(json_string_field_from_file "$update_config_file" "repository")"
+  manifest_template="$(json_string_field_from_file "$update_config_file" "manifestFileTemplate")"
   version_file_name="${version_file_name:-version.json}"
+  manifest_template="${manifest_template:-fablab-ai-v\{version\}.manifest.json}"
 
-  if [[ -z "$base_url" || -z "$package_template" ]]; then
+  if [[ -z "$package_template" ]]; then
     echo "Configuration du serveur de mise a jour incomplete (update.config.json)." >&2
     exit 1
   fi
 
   local version_url package_name package_url
-  version_url="${base_url%/}/${version}/${version_file_name}"
   package_name="${package_template//\{version\}/$version}"
-  package_url="${base_url%/}/${version}/${package_name}"
+  if [[ "$update_type" == "github-releases" ]]; then
+    if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+      echo "Le depot GitHub configure pour les mises a jour est invalide." >&2
+      exit 1
+    fi
+    local manifest_name
+    manifest_name="${manifest_template//\{version\}/$version}"
+    version_url="https://github.com/${repository}/releases/download/v${version}/${manifest_name}"
+    package_url="https://github.com/${repository}/releases/download/v${version}/${package_name}"
+  else
+    if [[ -z "$base_url" ]]; then
+      echo "Configuration du serveur de mise a jour incomplete (update.config.json)." >&2
+      exit 1
+    fi
+    version_url="${base_url%/}/${version}/${version_file_name}"
+    package_url="${base_url%/}/${version}/${package_name}"
+  fi
 
   local temp_root
   temp_root="$(mktemp -d)"
@@ -161,12 +180,27 @@ install_requested_version() {
     exit 1
   fi
 
-  local remote_version remote_sha256
+  local remote_version remote_sha256 manifest_package_name
   remote_version="$(json_string_field_from_file "$manifest_path" "version")"
   remote_sha256="$(json_string_field_from_file "$manifest_path" "sha256")"
+  manifest_package_name="$(json_string_field_from_file "$manifest_path" "packageFile")"
 
   if [[ "$remote_version" != "$version" ]]; then
     echo "La version distante annoncee (${remote_version:-inconnue}) ne correspond pas a ${version} demandee." >&2
+    exit 1
+  fi
+
+  if [[ -n "$manifest_package_name" ]]; then
+    package_name="$manifest_package_name"
+    if [[ "$update_type" == "github-releases" ]]; then
+      package_url="https://github.com/${repository}/releases/download/v${version}/${package_name}"
+    else
+      package_url="${base_url%/}/${version}/${package_name}"
+    fi
+  fi
+
+  if [[ ! "$remote_sha256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    echo "Le manifest de la version ${version} ne contient pas de SHA256 valide." >&2
     exit 1
   fi
 
@@ -178,20 +212,16 @@ install_requested_version() {
     exit 1
   fi
 
-  if [[ -n "$remote_sha256" ]]; then
-    echo "    Verification de l'integrite (SHA256)..." >&2
-    local computed_sha computed_sha_lower remote_sha256_lower
-    computed_sha="$(compute_sha256_file "$archive_path")"
-    # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
-    # cette syntaxe de minification introduite en bash 4.
-    computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
-    remote_sha256_lower="$(printf '%s' "$remote_sha256" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$computed_sha_lower" != "$remote_sha256_lower" ]]; then
-      echo "La verification SHA256 du package a echoue : version corrompue ou incidente." >&2
-      exit 1
-    fi
-  else
-    echo "Attention : le manifest ne fournit pas de somme SHA256, integrite non verifiee." >&2
+  echo "    Verification de l'integrite (SHA256)..." >&2
+  local computed_sha computed_sha_lower remote_sha256_lower
+  computed_sha="$(compute_sha256_file "$archive_path")"
+  # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
+  # cette syntaxe de minification introduite en bash 4.
+  computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
+  remote_sha256_lower="$(printf '%s' "$remote_sha256" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$computed_sha_lower" != "$remote_sha256_lower" ]]; then
+    echo "La verification SHA256 du package a echoue : version corrompue ou incidente." >&2
+    exit 1
   fi
 
   echo "    Preparation des fichiers..." >&2
@@ -559,21 +589,13 @@ if [[ -z "$current_encryption_key" ]]; then
   update_env "CONFIG_ENCRYPTION_KEY" "$(generate_random_key)"
 fi
 
-# JWT_SECRET et APP_PASSWORD_SEED sont fournis avec une valeur d'exemple non
-# vide dans .env.example (pas juste vide comme CONFIG_ENCRYPTION_KEY) : sans
-# cette regeneration, une installation fraiche demarrerait avec un secret JWT
-# et une graine de mot de passe rotatif previsibles et identiques a toutes
-# les autres installations n'ayant pas encore ete personnalisees.
+# JWT_SECRET est fourni avec une valeur d'exemple non vide dans .env.example :
+# sans cette regeneration, une installation fraiche demarrerait avec un secret
+# de signature previsible et identique a d'autres installations.
 current_jwt_secret="$(get_env_value "JWT_SECRET")"
 if [[ -z "$current_jwt_secret" || "$current_jwt_secret" == "changeme_secret_jwt_tres_long" ]]; then
   echo "Generation de JWT_SECRET (signature des sessions)..."
   update_env "JWT_SECRET" "$(generate_random_key)"
-fi
-
-current_password_seed="$(get_env_value "APP_PASSWORD_SEED")"
-if [[ -z "$current_password_seed" || "$current_password_seed" == "change_me_seed_tres_long_et_prive" ]]; then
-  echo "Generation de APP_PASSWORD_SEED (mot de passe admin rotatif)..."
-  update_env "APP_PASSWORD_SEED" "$(generate_random_key)"
 fi
 
 current_owner_password="$(get_env_value "OWNER_BOOTSTRAP_PASSWORD")"
@@ -698,12 +720,19 @@ echo "Construction de l'image backend pour generer le hash bcrypt..."
 retry_on_network_failure "Construction de l'image backend" \
   build_service_or_reuse_local "backend" "$BACKEND_IMAGE_NAME"
 
-echo "Generation des protections d'authentification..."
-generated_hash="$(
-  docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps backend \
-    node --input-type=module -e "import bcrypt from 'bcrypt'; const hash = await bcrypt.hash(process.env.OWNER_BOOTSTRAP_PASSWORD, 12); console.log(hash);"
-)"
-update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
+current_admin_hash="$(get_env_value "ADMIN_PASSWORD_HASH")"
+administrator_password_message=""
+if [[ -z "$current_admin_hash" ]]; then
+  echo "Generation du mot de passe initial administrateur..."
+  initial_admin_password="$(generate_random_key)"
+  generated_hash="$(
+    docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps \
+      -e "ADMIN_INITIAL_PASSWORD=$initial_admin_password" backend \
+      node --input-type=module -e "import bcrypt from 'bcrypt'; console.log(await bcrypt.hash(process.env.ADMIN_INITIAL_PASSWORD, 12));"
+  )"
+  update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
+  administrator_password_message="Identifiant administrateur : ${ADMIN_EMAIL:-admin@fablab.local} — mot de passe initial : ${initial_admin_password} (affiche une seule fois)"
+fi
 
 # Lit une reponse interactive avec un delai maximum de 10 minutes : au-dela,
 # on considere qu'il n'y a plus personne devant l'ecran (installation lancee a
@@ -970,13 +999,13 @@ has_teacher_password="$(
 
 teacher_password_message=""
 if [[ "$has_teacher_password" != "1" ]]; then
-  echo "Generation du mot de passe enseignant initial..."
+  echo "Generation du mot de passe initial référent..."
   generated_teacher_password="$(
     docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T backend \
       node scripts/reset-teacher-password.js 2>/dev/null | tail -n 2 | head -n 1 || true
   )"
   if [[ -n "$generated_teacher_password" ]]; then
-    teacher_password_message="Mot de passe enseignant initial : ${generated_teacher_password} (changement impose a la premiere connexion enseignant)"
+    teacher_password_message="Mot de passe initial référent : ${generated_teacher_password} (changement impose à la première connexion)"
   fi
 fi
 
@@ -987,14 +1016,13 @@ Initialisation terminee.
 - Application : http://localhost:$SERVER_PORT
 - Application reseau local : ${LOCAL_IP:+http://$LOCAL_IP:$SERVER_PORT}
 - Admin    : http://localhost:$SERVER_PORT/admin
-- Pour obtenir le mot de passe temporaire admin : cd "$ROOT_DIR" && ./password.sh
 ${teacher_password_message:+- $teacher_password_message}
+${administrator_password_message:+- $administrator_password_message}
 ${FIREWALL_NOTE:+
 Attention : $FIREWALL_NOTE}
 
 Scripts utiles :
 - Installer : ./install.sh
-- Mot de passe temporaire admin : ./password.sh
 - Mettre a jour : ./update.sh
 - Voir la version installee : ./version.sh
 - Redemarrer : ./restart.sh

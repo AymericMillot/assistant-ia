@@ -1,12 +1,11 @@
 {
   "server": {
-    "type": "http",
-    "baseUrl": "https://maj.aymericmillot.com/iutlab/maj",
-    "releaseLayout": "version-directories",
-    "versionFile": "version.json",
-    "packageFile": "",
+    "type": "github-releases",
+    "repository": "AymericMillot/assistant-ia",
+    "latestReleaseUrl": "https://github.com/AymericMillot/assistant-ia/releases/latest",
+    "releaseLayout": "github-releases",
+    "manifestFileTemplate": "fablab-ai-v{version}.manifest.json",
     "packageFileTemplate": "fablab-ai-v{version}.tar.gz",
-    "notesFile": "release-notes.txt",
     "requireSha256": true,
     "headers": {}
   },

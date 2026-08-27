@@ -12,6 +12,6 @@ const { generateAndSetTeacherPassword } = await import("../services/accessPasswo
 initializeDatabase();
 const password = await generateAndSetTeacherPassword();
 
-console.log("Nouveau mot de passe enseignant (a communiquer une seule fois) :");
+console.log("Nouveau mot de passe référent (à communiquer une seule fois) :");
 console.log(password);
-console.log("Le changement de ce mot de passe sera impose a la prochaine connexion enseignant.");
+console.log("Le changement de ce mot de passe sera imposé à la prochaine connexion.");

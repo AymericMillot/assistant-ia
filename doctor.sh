@@ -272,7 +272,7 @@ else
   fi
 fi
 
-for secret_key in JWT_SECRET APP_PASSWORD_SEED CONFIG_ENCRYPTION_KEY; do
+for secret_key in JWT_SECRET CONFIG_ENCRYPTION_KEY; do
   secret_value="$(get_env_value "$secret_key")"
   if [[ ${#secret_value} -lt 32 || "$secret_value" == changeme* || "$secret_value" == change_me* ]]; then
     say_fail "${secret_key} est absent, trop court ou utilise encore une valeur d'exemple."
@@ -502,7 +502,7 @@ if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep
       say_fail "Un compte initial utilise encore un ancien mot de passe previsible."
       if confirm "Synchroniser immediatement la configuration locale ?"; then
         if docker exec fablab-backend node --input-type=module -e \
-          "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier, setSetting, updateAdminUserPasswordById } from './config/db.js'; const password=String(process.env.OWNER_BOOTSTRAP_PASSWORD||''); if(password.length<16) process.exit(2); const hash=await bcrypt.hash(password,12); setSetting('ownerPasswordHash',hash); const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@fablab.local'); if(user?.role==='owner') updateAdminUserPasswordById(user.id,hash);"; then
+          "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier, setSetting, updateAdminUserPasswordById } from './config/db.js'; const password=String(process.env.OWNER_BOOTSTRAP_PASSWORD||''); if(password.length<16) process.exit(2); const hash=await bcrypt.hash(password,12); setSetting('ownerPasswordHash',hash); const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@fablab.local'); if(user) updateAdminUserPasswordById(user.id,hash);"; then
           undo_last_fail
           say_fixed "Configuration locale synchronisee."
         else
@@ -573,13 +573,27 @@ update_config_file="$ROOT_DIR/update.config.json"
 if [[ ! -f "$update_config_file" ]]; then
   say_warn "update.config.json introuvable : ./update.sh ne pourra pas verifier de mise a jour distante (reconstruction locale seule)."
 else
+  update_type="$(grep -o '"type"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
   update_base_url="$(grep -o '"baseUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
-  if [[ -z "$update_base_url" ]]; then
-    say_warn "update.config.json ne definit pas de baseUrl : reconstruction locale uniquement."
+  if [[ "$update_type" == "github-releases" ]]; then
+    update_repository="$(grep -o '"repository"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    update_latest_url="$(grep -o '"latestReleaseUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    update_latest_url="${update_latest_url:-https://github.com/${update_repository}/releases/latest}"
+    if [[ ! "$update_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+      say_fail "Le depot GitHub configure pour les mises a jour est invalide."
+    elif curl -fsSL --max-time 8 -o /dev/null "$update_latest_url" 2>/dev/null; then
+      say_ok "GitHub Releases est joignable (${update_repository})."
+    else
+      say_warn "GitHub Releases est indisponible ou aucune release publiee n'est accessible (${update_repository})."
+    fi
   elif curl -sf --max-time 5 -o /dev/null "$update_base_url" 2>/dev/null || curl -sf --max-time 5 -o /dev/null "${update_base_url%/}/version.json" 2>/dev/null; then
     say_ok "Serveur de mise a jour distant joignable (${update_base_url})."
   else
-    say_warn "Serveur de mise a jour distant injoignable (${update_base_url}) : ./update.sh se rabattra automatiquement sur une reconstruction locale."
+    if [[ -z "$update_base_url" ]]; then
+      say_warn "update.config.json ne definit pas de source de mise a jour distante."
+    else
+      say_warn "Serveur de mise a jour distant injoignable (${update_base_url}) : ./update.sh se rabattra automatiquement sur une reconstruction locale."
+    fi
   fi
 fi
 

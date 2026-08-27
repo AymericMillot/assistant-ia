@@ -18,23 +18,22 @@ const actionLabels = {
   "model.delete": "Suppression de modèle",
   "system.purge-all-data": "Suppression de toutes les données",
   "system.purge-conversations-feedback": "Suppression des conversations et feedbacks",
-  "auth.teacher-password-change": "Changement du mot de passe enseignant",
+  "auth.teacher-password-change": "Changement du mot de passe référent",
   "deployment.publish": "Publication d'une version",
   "update.apply": "Installation d'une mise à jour",
   "update.rollback": "Retour arrière (rollback)"
 };
 
 const roleLabels = {
-  owner: "Administration",
-  teacher: "Enseignant",
-  app: "Mot de passe rotatif"
+  administrator: "Administrateur",
+  referent: "Référent"
 };
 
 function roleTone(role) {
-  if (role === "owner") {
+  if (role === "administrator") {
     return "info";
   }
-  if (role === "teacher") {
+  if (role === "referent") {
     return "success";
   }
   return "neutral";

@@ -17,7 +17,10 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY backend/package*.json ./
-RUN npm ci --omit=dev
+# @langchain/community déclare des peer dependencies optionnelles incompatibles
+# entre elles (Stagehand/Zod). Elles ne sont pas utilisées par cette application,
+# mais npm 11 les bloque tout de même sans ce mode de résolution déterministe.
+RUN npm ci --omit=dev --legacy-peer-deps
 
 COPY backend/ ./
 COPY --from=frontend-build /workspace/frontend/dist /app/public

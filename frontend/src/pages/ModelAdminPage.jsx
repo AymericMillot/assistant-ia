@@ -154,7 +154,7 @@ const baseTabs = [
   { id: "performance", label: "Performance" },
   { id: "donnees", label: "Données" }
 ];
-const ownerOnlyTabs = [
+const elevatedTabs = [
   { id: "mise-a-jour", label: "Mise à jour" },
   { id: "comptes-admin", label: "Comptes admin" },
   { id: "audit", label: "Audit" },
@@ -171,7 +171,8 @@ export default function ModelAdminPage() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [userRole, setUserRole] = useState(null);
 
-  const tabs = userRole === "owner" ? [...baseTabs, ...ownerOnlyTabs] : baseTabs;
+  const hasElevatedAccess = ["administrator", "owner"].includes(userRole);
+  const tabs = hasElevatedAccess ? [...baseTabs, ...elevatedTabs] : baseTabs;
   const validTabIds = new Set(tabs.map((tab) => tab.id));
 
   const requestedTab = searchParams.get("tab") || defaultTabId;
@@ -353,9 +354,9 @@ export default function ModelAdminPage() {
       {activeTab === "performance" && <PerformanceManager />}
       {activeTab === "donnees" && <DataManager />}
       {activeTab === "mise-a-jour" && <UpdateManager />}
-      {activeTab === "comptes-admin" && userRole === "owner" && <AdminUsersManager />}
-      {activeTab === "audit" && userRole === "owner" && <AuditLogManager />}
-      {activeTab === "export-deploiement" && userRole === "owner" && <DeploymentManager />}
+      {activeTab === "comptes-admin" && hasElevatedAccess && <AdminUsersManager />}
+      {activeTab === "audit" && hasElevatedAccess && <AuditLogManager />}
+      {activeTab === "export-deploiement" && hasElevatedAccess && <DeploymentManager />}
       <SupportManager />
     </div>
   );

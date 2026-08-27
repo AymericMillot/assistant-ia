@@ -63,7 +63,7 @@ export function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'teacher',
+      role TEXT NOT NULL DEFAULT 'referent',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -372,8 +372,13 @@ export function initializeDatabase() {
   const adminUserColumns = dbInstance.prepare("PRAGMA table_info(admin_users)").all();
   const hasAdminUserRoleColumn = adminUserColumns.some((column) => column.name === "role");
   if (!hasAdminUserRoleColumn) {
-    dbInstance.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'teacher'");
+    dbInstance.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'referent'");
   }
+
+  // Migration des anciennes appellations vers les rôles publics actuels. Le
+  // rôle interne d'assistance n'est jamais proposé dans la gestion des comptes.
+  dbInstance.exec("UPDATE admin_users SET role = 'referent' WHERE role = 'teacher'");
+  dbInstance.exec("UPDATE admin_users SET role = 'administrator' WHERE role = 'owner'");
 
   // Le premier compte admin nomme est cree a l'installation (identifiant +
   // hash bcrypt generes par install.sh) avec le role "owner" : c'est le
@@ -381,7 +386,7 @@ export function initializeDatabase() {
   ensureAdminUser(
     process.env.ADMIN_EMAIL || "admin@fablab.local",
     process.env.ADMIN_PASSWORD_HASH || "",
-    "owner"
+    "administrator"
   );
 
   return dbInstance;
@@ -437,7 +442,7 @@ export function setSettingEncrypted(key, plainValue) {
   setSetting(key, encryptSecret(plainValue));
 }
 
-export function ensureAdminUser(email, passwordHash, role = "teacher") {
+export function ensureAdminUser(email, passwordHash, role = "referent") {
   const existingUser = getDb().prepare("SELECT id FROM admin_users WHERE email = ?").get(email);
   if (existingUser || !passwordHash) {
     return;
@@ -455,13 +460,11 @@ const adminUserSelectColumns = "id, email AS identifier, role, created_at AS cre
 
 /**
  * Comptes admin nommes (identifiant + mot de passe propres), en plus des
- * mots de passe partages historiques (rotatif/owner/teacher) geres par
- * accessPasswordService.js. Chaque compte a un role ("owner" ou "teacher")
- * qui determine ses droits, comme pour les mots de passe partages.
+ * chaque compte ayant un rôle public limité à « referent » ou « administrator ».
  */
 export function listAdminUsers() {
   return getDb()
-    .prepare(`SELECT ${adminUserSelectColumns} FROM admin_users ORDER BY created_at ASC`)
+    .prepare(`SELECT ${adminUserSelectColumns} FROM admin_users WHERE role != 'owner' ORDER BY created_at ASC`)
     .all();
 }
 

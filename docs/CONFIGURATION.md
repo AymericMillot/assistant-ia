@@ -15,7 +15,7 @@
 
 Voir `.env.example` pour la liste complète et à jour, commentée par section. Points clés :
 
-- **Secrets** (`JWT_SECRET`, `APP_PASSWORD_SEED`, `CONFIG_ENCRYPTION_KEY`) : générer des valeurs
+- **Secrets** (`JWT_SECRET`, `CONFIG_ENCRYPTION_KEY`) : générer des valeurs
   uniques et privées, ne jamais réutiliser les exemples.
 - **Secrets locaux** : générés localement à l'installation, hachés avec bcrypt en base
   lorsqu'ils servent à l'authentification et jamais inclus dans un export.

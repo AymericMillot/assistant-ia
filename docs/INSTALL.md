@@ -27,7 +27,7 @@ chmod +x install.sh doctor.sh update.sh restart.sh stop.sh
 4. protège `.env` avec des permissions `600`, construit les images et démarre tous les services,
 5. attend qu'Ollama soit prêt, télécharge le modèle par défaut (`DEFAULT_MODEL`) et le modèle
    d'embedding (`EMBEDDING_MODEL`),
-6. affiche l'URL de l'application et le mot de passe d'accès initial.
+6. affiche l'URL de l'application et les identifiants du compte administrateur initial.
 
 En environnement non interactif (CI, serveur sans terminal attaché), utilisez :
 
@@ -44,9 +44,8 @@ protégé. Ne placez jamais de secret dans le dépôt ou dans une archive.
 - Application : `http://localhost:3000` (ou l'IP de la machine sur le réseau local, voir plus
   bas).
 - Administration : `http://localhost:3000/admin`.
-- Mot de passe d'accès temporaire rotatif : `./password.sh`.
-- Mot de passe enseignant généré automatiquement : affiché une seule fois à la fin de
-  l'installation. Le changement est imposé à la première connexion enseignant.
+- Compte administrateur initial : ses identifiants sont affichés une seule fois à la fin de
+  l'installation. Créez ensuite les comptes Référent et Administrateur depuis l'administration.
 
 ## Personnalisation
 

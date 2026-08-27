@@ -116,13 +116,13 @@ fi
 
 wait_for_backend_ready
 
-echo "Generation d'un nouveau mot de passe enseignant..."
+echo "Generation d'un nouveau mot de passe référent..."
 GENERATED_TEACHER_PASSWORD="$(
   docker_compose exec -T backend node scripts/reset-teacher-password.js 2>/dev/null | tail -n 2 | head -n 1 || true
 )"
 
 print_access_summary "Reinitialisation terminee. Toutes les donnees et parametres ont ete supprimes."
 if [[ -n "$GENERATED_TEACHER_PASSWORD" ]]; then
-  echo "Nouveau mot de passe enseignant : ${GENERATED_TEACHER_PASSWORD} (changement impose a la premiere connexion)"
+  echo "Nouveau mot de passe référent : ${GENERATED_TEACHER_PASSWORD} (changement impose a la premiere connexion)"
   echo
 fi

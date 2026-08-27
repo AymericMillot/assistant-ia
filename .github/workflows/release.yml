@@ -1,0 +1,52 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate tag and version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(node -p "require('./version.json').version")"
+          test "$tag" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build release archives
+        run: ./export.sh
+      - name: Build signed metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          folder="export/$version"
+          archive="fablab-ai-v$version.tar.gz"
+          sha256="$(sha256sum "$folder/$archive" | awk '{print $1}')"
+          node -e "const fs=require('fs'); const version=process.argv[1]; const sha256=process.argv[2]; const archive=process.argv[3]; fs.writeFileSync(process.argv[4], JSON.stringify({version,sha256,packageFile:archive,publishedAt:new Date().toISOString()},null,2)+'\\n')" "$version" "$sha256" "$archive" "$folder/fablab-ai-v$version.manifest.json"
+          cp release-notes.txt "$folder/fablab-ai-v$version.notes.md"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          folder="export/$version"
+          gh release create "v$version" \
+            "$folder/fablab-ai-v$version.tar.gz#FablabAI $version (Linux)" \
+            "$folder/fablab-ai-v$version.zip#FablabAI $version (ZIP)" \
+            "$folder/fablab-ai-v$version.manifest.json#Manifest de vérification" \
+            "$folder/fablab-ai-v$version.notes.md#Notes de version" \
+            --title "FablabAI $version" --notes-file release-notes.txt

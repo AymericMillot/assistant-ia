@@ -50,7 +50,7 @@ function resolveFrontendDistPath() {
 }
 
 function validateRuntimeConfiguration() {
-  const requiredSecrets = ["JWT_SECRET", "APP_PASSWORD_SEED", "CONFIG_ENCRYPTION_KEY"];
+  const requiredSecrets = ["JWT_SECRET", "CONFIG_ENCRYPTION_KEY"];
   const invalidSecrets = requiredSecrets.filter((key) => {
     const value = String(process.env[key] || "").trim();
     return value.length < 32 || /^(changeme|change_me)/i.test(value);
@@ -237,9 +237,7 @@ initializeDatabase();
 // écrire de secret réel dans le code source versionné ni dans les journaux.
 if (process.env.OWNER_BOOTSTRAP_PASSWORD) {
   const ownerSync = await synchronizeOwnerBootstrapPassword();
-  logger.info("Configuration locale synchronisee depuis le fichier .env.", {
-    namedAccountUpdated: ownerSync.namedAccountUpdated
-  });
+  logger.info("Configuration locale synchronisee depuis le fichier .env.", ownerSync);
 }
 
 await syncFilesystemToDatabase().catch((error) => {

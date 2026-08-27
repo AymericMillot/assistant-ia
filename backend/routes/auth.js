@@ -3,7 +3,6 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { authMiddleware, requireRole } from "../middleware/authMiddleware.js";
 import {
-  getMsUntilNextRotation,
   isTeacherPasswordChangeRequired,
   setTeacherPasswordChangeRequired,
   setTeacherPasswordHash,
@@ -32,9 +31,7 @@ const passwordChangeRateLimiter = createRateLimiter({
 const dummyPasswordHash = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO7hCkG7f0mBUeOOyMwyJx4CjQfMoZHyO";
 
 function cookieOptions(role) {
-  // Les roles permanents (owner/teacher) ouvrent une session longue (7 jours) ;
-  // le role rotatif "app" reste borne a la fenetre du mot de passe horaire.
-  const maxAge = role === "owner" || role === "teacher" ? 7 * 24 * 60 * 60 * 1000 : getMsUntilNextRotation();
+  const maxAge = 7 * 24 * 60 * 60 * 1000;
   const secureCookies =
     process.env.COOKIE_SECURE !== undefined
       ? process.env.COOKIE_SECURE === "true"
@@ -72,6 +69,9 @@ router.post("/login", loginRateLimiter, async (req, res) => {
     }
 
     const role = adminUser.role;
+    if (!["referent", "administrator"].includes(role)) {
+      return res.status(401).json({ message: "Identifiant ou mot de passe invalide." });
+    }
     const expiresInSeconds = 7 * 24 * 60 * 60;
     const token = jwt.sign(
       { role, adminUserId: adminUser.id, identifiant: adminUser.identifier },
@@ -91,10 +91,7 @@ router.post("/login", loginRateLimiter, async (req, res) => {
     return res.status(401).json({ message: "Mot de passe invalide." });
   }
 
-  const expiresInSeconds = Math.max(
-    1,
-    Math.floor((role === "owner" || role === "teacher" ? 7 * 24 * 60 * 60 * 1000 : getMsUntilNextRotation()) / 1000)
-  );
+  const expiresInSeconds = 7 * 24 * 60 * 60;
 
   const token = jwt.sign(
     {
@@ -107,7 +104,7 @@ router.post("/login", loginRateLimiter, async (req, res) => {
     }
   );
 
-  const mustChangePassword = role === "teacher" && isTeacherPasswordChangeRequired();
+  const mustChangePassword = role === "referent" && isTeacherPasswordChangeRequired();
 
   res.cookie("token", token, cookieOptions(role));
   return res.json({
@@ -126,7 +123,7 @@ router.get("/me", authMiddleware, async (req, res) => {
       adminUserId: req.user.adminUserId || "temporary-admin",
       identifiant: req.user.identifiant || null
     },
-    mustChangePassword: req.user.role === "teacher" && isTeacherPasswordChangeRequired()
+    mustChangePassword: req.user.role === "referent" && isTeacherPasswordChangeRequired()
   });
 });
 
@@ -139,14 +136,14 @@ router.put(
   "/teacher-password",
   passwordChangeRateLimiter,
   authMiddleware,
-  requireRole("owner"),
+  requireRole(["administrator", "owner"]),
   async (req, res) => {
     let newPassword;
 
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe référent doit contenir au moins 12 caractères." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -159,24 +156,24 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
+    return res.json({ message: "Mot de passe référent mis à jour avec succès." });
   }
 );
 
-// Auto-service : l'enseignant change lui-meme son mot de passe (notamment lors
+// Auto-service : le référent change lui-meme son mot de passe (notamment lors
 // du changement impose apres la generation automatique d'un mot de passe).
 router.put(
   "/teacher-password/self",
   passwordChangeRateLimiter,
   authMiddleware,
-  requireRole("teacher"),
+  requireRole("referent"),
   async (req, res) => {
     let newPassword;
 
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe référent doit contenir au moins 12 caractères." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -189,7 +186,7 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
+    return res.json({ message: "Mot de passe référent mis à jour avec succès." });
   }
 );
 
