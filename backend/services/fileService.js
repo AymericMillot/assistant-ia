@@ -24,6 +24,11 @@ const frenchCollator = new Intl.Collator("fr", {
   ignorePunctuation: true
 });
 const syncCooldownMs = Number(process.env.FILESYSTEM_SYNC_COOLDOWN_MS || 2000);
+const documentUploadMaxBytes = Math.max(
+  1,
+  Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES || 100 * 1024 * 1024)
+);
+const documentUploadMaxFiles = Math.max(1, Number(process.env.DOCUMENT_UPLOAD_MAX_FILES || 20));
 const supportedExtensions = new Set([
   ".pdf",
   ".txt",
@@ -370,7 +375,13 @@ function uploadFilter(_req, file, callback) {
 
 export const uploadMiddleware = multer({
   storage,
-  fileFilter: uploadFilter
+  fileFilter: uploadFilter,
+  limits: {
+    fileSize: documentUploadMaxBytes,
+    files: documentUploadMaxFiles,
+    fields: 10,
+    parts: documentUploadMaxFiles + 10
+  }
 });
 
 export async function saveUploadedFiles(files, folderName) {

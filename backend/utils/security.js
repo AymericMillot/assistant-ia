@@ -23,6 +23,33 @@ function isPrivateIpv4Host(hostname) {
   );
 }
 
+function isPrivateIpv6Host(hostname) {
+  if (!hostname || typeof hostname !== "string") {
+    return false;
+  }
+
+  const normalized = hostname.toLowerCase();
+  return normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd");
+}
+
+function getAllowedLocalPorts() {
+  const ports = new Set([
+    String(process.env.PORT || "3000"),
+    String(process.env.FRONTEND_DEV_PORT || "3001")
+  ]);
+
+  [process.env.FRONTEND_ORIGIN, process.env.APP_ORIGIN].filter(Boolean).forEach((value) => {
+    try {
+      const parsed = new URL(String(value).trim());
+      ports.add(parsed.port || (parsed.protocol === "https:" ? "443" : "80"));
+    } catch {
+      // La validation globale signalera separement une origine configuree invalide.
+    }
+  });
+
+  return ports;
+}
+
 function isTrustedLocalNetworkOrigin(origin) {
   const normalizedOrigin = extractOriginCandidate(origin);
   if (!normalizedOrigin) {
@@ -34,15 +61,14 @@ function isTrustedLocalNetworkOrigin(origin) {
     const hostname = parsed.hostname;
     const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
 
-    if (hostname === "localhost" || hostname === "127.0.0.1") {
-      return port === "3000";
-    }
+    const isLocalHostname =
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname.endsWith(".local") ||
+      isPrivateIpv4Host(hostname) ||
+      isPrivateIpv6Host(hostname);
 
-    if (hostname.endsWith(".local")) {
-      return port === "3000";
-    }
-
-    return isPrivateIpv4Host(hostname) && port === "3000";
+    return isLocalHostname && getAllowedLocalPorts().has(port);
   } catch {
     return false;
   }

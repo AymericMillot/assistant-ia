@@ -49,10 +49,20 @@ export function toUserMessage(error, fallback = "Une erreur est survenue. Réess
     return looksTechnical(error?.message) ? "Cette action entre en conflit avec l'état actuel." : error.message;
   }
   if (statusCode === 429) {
-    return "Trop de demandes en peu de temps. Patientez quelques secondes puis réessayez.";
+    // Le message backend precise parfois un delai bien plus long qu'"quelques secondes"
+    // (ex: limite du raisonnement approfondi, une fois toutes les 5 minutes) : l'afficher
+    // quand il est sur, plutot qu'un message generique qui induirait en erreur.
+    return looksTechnical(error?.message)
+      ? "Trop de demandes en peu de temps. Patientez quelques secondes puis réessayez."
+      : error.message;
   }
   if (statusCode >= 500) {
-    return "Le serveur rencontre un problème temporaire. Réessayez dans un instant.";
+    // Certains 5xx portent un message backend precis et deja sur a afficher
+    // (ex: 503 "service de mise a jour indisponible") : le montrer plutot
+    // qu'un message generique qui masquerait une information utile a l'admin.
+    return looksTechnical(error?.message)
+      ? "Le serveur rencontre un problème temporaire. Réessayez dans un instant."
+      : error.message;
   }
 
   if (!looksTechnical(error?.message)) {

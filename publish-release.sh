@@ -8,7 +8,9 @@
 #      packages non vérifiables).
 #   3. Génère le manifest version.json { version, sha256, publishedAt }.
 #   4. Téléverse le dossier de version en FTPS (TLS exigé) vers le serveur.
-#   5. Vérifie que la release est bien accessible via l'URL publique HTTPS.
+#   5. Téléverse aussi fablab-ai.zip (dernière version, nom fixe) pour
+#      l'installation web en une commande (irm ... | iex, voir web-install.ps1).
+#   6. Vérifie que la release est bien accessible via l'URL publique HTTPS.
 #
 # Les identifiants FTP sont lus depuis .env.publish (non versionné).
 # L'application consommatrice n'utilise jamais ces identifiants : elle lit
@@ -32,7 +34,9 @@ de mise à jour distant défini dans .env.publish.
 
 Avant de lancer :
   1. Mettre à jour la version dans version.json
-  2. Écrire les notes de version dans release-notes.txt (racine du projet)
+  2. (Optionnel) Écrire les notes de version dans release-notes.txt (racine du
+     projet) - à défaut, une note minimale (version + date) est générée
+     automatiquement.
 
 Options:
   --dry-run     Construit et prépare tout, sans téléverser.
@@ -74,12 +78,6 @@ for required_var in FTP_HOST FTP_USER FTP_PASSWORD FTP_REMOTE_DIR; do
   fi
 done
 
-if [[ ! -f "$NOTES_SOURCE" ]]; then
-  echo "release-notes.txt introuvable à la racine du projet." >&2
-  echo "Écrivez les notes de cette version avant de publier." >&2
-  exit 1
-fi
-
 read_project_version() {
   node -e '
     const fs = require("fs");
@@ -119,6 +117,8 @@ echo "==> Construction de l'archive (export.sh)..."
 STAGING_DIR="$ROOT_DIR/export/$VERSION"
 ARCHIVE_NAME="fablab-ai-v${VERSION}.tar.gz"
 ARCHIVE_PATH="$STAGING_DIR/$ARCHIVE_NAME"
+LATEST_ZIP_NAME="fablab-ai-v${VERSION}.zip"
+LATEST_ZIP_PATH="$STAGING_DIR/$LATEST_ZIP_NAME"
 
 if [[ ! -f "$ARCHIVE_PATH" ]]; then
   echo "Archive attendue introuvable : $ARCHIVE_PATH" >&2
@@ -140,7 +140,15 @@ cat > "$STAGING_DIR/version.json" <<EOF
 }
 EOF
 
-cp "$NOTES_SOURCE" "$STAGING_DIR/release-notes.txt"
+if [[ -f "$NOTES_SOURCE" ]]; then
+  cp "$NOTES_SOURCE" "$STAGING_DIR/release-notes.txt"
+else
+  echo "==> release-notes.txt absent : note minimale generee automatiquement."
+  cat > "$STAGING_DIR/release-notes.txt" <<EOF
+Version ${VERSION}
+Date de publication : ${PUBLISHED_AT}
+EOF
+fi
 
 echo "==> Dossier de release prêt : $STAGING_DIR"
 ls -lh "$STAGING_DIR"
@@ -153,27 +161,44 @@ fi
 
 REMOTE_BASE="ftp://${FTP_HOST}/${FTP_REMOTE_DIR%/}/${VERSION}"
 
+# Dossier distant ou est deposee la derniere version en .zip (installation
+# web en une commande, irm ... | iex - voir web-install.ps1), separement du
+# dossier versionne utilise par le mecanisme de mise a jour automatique.
+# Par defaut, un niveau au-dessus de FTP_REMOTE_DIR (ex: si FTP_REMOTE_DIR
+# pointe vers ".../iutlab/maj", la racine ".../iutlab" recoit fablab-ai.zip) ;
+# surchargeable via FTP_LATEST_ZIP_DIR dans .env.publish si l'arborescence
+# distante est differente.
+LATEST_ZIP_REMOTE_DIR="${FTP_LATEST_ZIP_DIR:-$(dirname "$FTP_REMOTE_DIR")}"
+
 upload_file() {
   local local_path="$1"
-  local remote_name="$2"
+  local remote_url="$2"
 
   # --ssl-reqd : refuse toute connexion si le serveur n'accepte pas TLS.
-  # --ftp-create-dirs : crée le dossier de version distant si besoin.
+  # --ftp-create-dirs : crée le dossier distant si besoin.
   curl --fail --silent --show-error \
     --ssl-reqd \
     --ftp-create-dirs \
     --user "${FTP_USER}:${FTP_PASSWORD}" \
     --upload-file "$local_path" \
-    "${REMOTE_BASE}/${remote_name}"
+    "$remote_url"
 }
 
 echo "==> Téléversement FTPS vers ${FTP_HOST}/${FTP_REMOTE_DIR%/}/${VERSION}/ ..."
-upload_file "$ARCHIVE_PATH" "$ARCHIVE_NAME"
+upload_file "$ARCHIVE_PATH" "${REMOTE_BASE}/${ARCHIVE_NAME}"
 echo "    Archive envoyée."
-upload_file "$STAGING_DIR/version.json" "version.json"
+upload_file "$STAGING_DIR/version.json" "${REMOTE_BASE}/version.json"
 echo "    Manifest envoyé."
-upload_file "$STAGING_DIR/release-notes.txt" "release-notes.txt"
+upload_file "$STAGING_DIR/release-notes.txt" "${REMOTE_BASE}/release-notes.txt"
 echo "    Notes envoyées."
+
+if [[ -f "$LATEST_ZIP_PATH" ]]; then
+  echo "==> Téléversement de fablab-ai.zip (installation web) vers ${FTP_HOST}/${LATEST_ZIP_REMOTE_DIR%/}/ ..."
+  upload_file "$LATEST_ZIP_PATH" "ftp://${FTP_HOST}/${LATEST_ZIP_REMOTE_DIR%/}/fablab-ai.zip"
+  echo "    fablab-ai.zip mis à jour (toujours la dernière version)."
+else
+  echo "Attention : ${LATEST_ZIP_NAME} introuvable, fablab-ai.zip non mis à jour." >&2
+fi
 
 if [[ -n "${PUBLIC_BASE_URL:-}" ]]; then
   echo "==> Vérification de l'accès public HTTPS..."

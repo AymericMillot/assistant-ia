@@ -5,6 +5,50 @@ import Alert from "../../components/ui/Alert";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import StatusBadge from "../../components/ui/StatusBadge";
 
+function buildDefaultNotes(version) {
+  return `Version ${version} — publiée le ${formatDateTime(new Date())}.`;
+}
+
+// Persiste le brouillon de note (auto-genere ou modifie a la main) dans le
+// navigateur : un rechargement de la page (ou une fermeture d'onglet avant
+// publication) ne doit ni le perdre, ni regenerer un nouvel horodatage.
+const NOTES_DRAFT_STORAGE_KEY = "fablab-admin-deployment-notes-draft";
+
+function loadNotesDraft(version) {
+  try {
+    const raw = window.localStorage.getItem(NOTES_DRAFT_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    if (parsed?.version !== version || typeof parsed?.notes !== "string") {
+      return null;
+    }
+
+    return parsed.notes;
+  } catch {
+    return null;
+  }
+}
+
+function saveNotesDraft(version, notes) {
+  try {
+    window.localStorage.setItem(NOTES_DRAFT_STORAGE_KEY, JSON.stringify({ version, notes }));
+  } catch {
+    // Stockage indisponible (navigation privee, quota...) : la note reste utilisable,
+    // simplement non persistante pour cette session.
+  }
+}
+
+function clearNotesDraft() {
+  try {
+    window.localStorage.removeItem(NOTES_DRAFT_STORAGE_KEY);
+  } catch {
+    // Rien a faire si le stockage est indisponible.
+  }
+}
+
 function statusLabel(status) {
   switch (status) {
     case "building":
@@ -31,15 +75,13 @@ export default function DeploymentManager() {
   const [loading, setLoading] = useState(true);
   const [version, setVersion] = useState("");
   const [notes, setNotes] = useState("");
+  // Tant que l'admin n'a pas modifie la note a la main, elle reste generee/restauree
+  // automatiquement (voir l'effet plus bas) plutot que de rester figee a vide.
+  const [notesEdited, setNotesEdited] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
-
-  const [teacherPasswordForm, setTeacherPasswordForm] = useState({ newPassword: "", confirmPassword: "" });
-  const [teacherPasswordSaving, setTeacherPasswordSaving] = useState(false);
-  const [teacherPasswordMessage, setTeacherPasswordMessage] = useState("");
-  const [teacherPasswordError, setTeacherPasswordError] = useState("");
 
   const [ftpConfig, setFtpConfig] = useState(null);
   const [ftpForm, setFtpForm] = useState({
@@ -121,10 +163,31 @@ export default function DeploymentManager() {
 
   useEffect(() => {
     if (status?.state?.status === "completed" || status?.state?.status === "completed-unverified") {
+      clearNotesDraft();
       setVersion(status.suggestedNextVersion || "");
-      setNotes("");
+      setNotesEdited(false);
     }
   }, [status?.state?.status, status?.state?.completedAt]);
+
+  // Note de version pre-remplie par defaut (date/heure + version), persistee dans
+  // le navigateur pour ne pas se reinitialiser au moindre rechargement de page et
+  // ne jamais bloquer la publication faute d'avoir ecrit un texte a la main.
+  useEffect(() => {
+    if (!version || notesEdited) {
+      return;
+    }
+
+    const draft = loadNotesDraft(version);
+    if (draft !== null) {
+      setNotes(draft);
+      setNotesEdited(true);
+      return;
+    }
+
+    const defaultNotes = buildDefaultNotes(version);
+    setNotes(defaultNotes);
+    saveNotesDraft(version, defaultNotes);
+  }, [version, notesEdited]);
 
   async function publish() {
     setConfirmOpen(false);
@@ -151,37 +214,6 @@ export default function DeploymentManager() {
     setConfirmOpen(true);
   }
 
-  async function submitTeacherPassword(event) {
-    event.preventDefault();
-    setTeacherPasswordMessage("");
-    setTeacherPasswordError("");
-
-    if (teacherPasswordForm.newPassword.length < 12) {
-      setTeacherPasswordError("Le mot de passe doit contenir au moins 12 caractères.");
-      return;
-    }
-
-    if (teacherPasswordForm.newPassword !== teacherPasswordForm.confirmPassword) {
-      setTeacherPasswordError("Les deux mots de passe ne correspondent pas.");
-      return;
-    }
-
-    setTeacherPasswordSaving(true);
-
-    try {
-      const payload = await fetchJson("/api/auth/teacher-password", {
-        method: "PUT",
-        body: JSON.stringify({ newPassword: teacherPasswordForm.newPassword })
-      });
-      setTeacherPasswordMessage(payload.message);
-      setTeacherPasswordForm({ newPassword: "", confirmPassword: "" });
-    } catch (requestError) {
-      setTeacherPasswordError(reportError("deployment:teacher-password", requestError));
-    } finally {
-      setTeacherPasswordSaving(false);
-    }
-  }
-
   if (loading) {
     return (
       <section className="subpanel px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -204,7 +236,7 @@ export default function DeploymentManager() {
 
       <section className="panel px-6 py-6 sm:px-8">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500 dark:text-slate-400">
-          Réservé au propriétaire
+          Administration
         </p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
           Export et déploiement
@@ -275,7 +307,11 @@ export default function DeploymentManager() {
             <textarea
               className="input min-h-[120px]"
               value={notes}
-              onChange={(event) => setNotes(event.target.value)}
+              onChange={(event) => {
+                setNotesEdited(true);
+                setNotes(event.target.value);
+                saveNotesDraft(version, event.target.value);
+              }}
               placeholder="Ce qui a changé dans cette version..."
               disabled={busy}
             />
@@ -326,52 +362,6 @@ export default function DeploymentManager() {
             ) : null}
           </div>
         ) : null}
-      </section>
-
-      <section className="subpanel p-6">
-        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Mot de passe administrateurs</h3>
-        <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-          Change le mot de passe permanent utilisé par les administrateurs pour déposer des documents
-          à indexer. Sans effet sur ton propre mot de passe.
-        </p>
-
-        <form className="mt-4 max-w-md space-y-4" onSubmit={submitTeacherPassword}>
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Nouveau mot de passe
-            </label>
-            <input
-              type="password"
-              className="input"
-              value={teacherPasswordForm.newPassword}
-              onChange={(event) =>
-                setTeacherPasswordForm((current) => ({ ...current, newPassword: event.target.value }))
-              }
-              autoComplete="new-password"
-            />
-          </div>
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Confirmation
-            </label>
-            <input
-              type="password"
-              className="input"
-              value={teacherPasswordForm.confirmPassword}
-              onChange={(event) =>
-                setTeacherPasswordForm((current) => ({ ...current, confirmPassword: event.target.value }))
-              }
-              autoComplete="new-password"
-            />
-          </div>
-
-          {teacherPasswordMessage ? <Alert tone="success">{teacherPasswordMessage}</Alert> : null}
-          {teacherPasswordError ? <Alert tone="error">{teacherPasswordError}</Alert> : null}
-
-          <button className="soft-button" disabled={teacherPasswordSaving}>
-            {teacherPasswordSaving ? "Mise à jour..." : "Mettre à jour le mot de passe administrateurs"}
-          </button>
-        </form>
       </section>
 
       <section className="subpanel p-6">

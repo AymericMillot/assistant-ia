@@ -26,6 +26,11 @@ const passwordChangeRateLimiter = createRateLimiter({
   message: "Trop de tentatives. Reessayez dans quelques minutes."
 });
 
+// Hash bcrypt factice (mot de passe aleatoire, jamais utilise ailleurs) : compare
+// toujours contre un hash quand l'identifiant est inconnu, pour que le temps de
+// reponse ne revele pas si l'identifiant existe (sinon bcrypt.compare est saute).
+const dummyPasswordHash = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO7hCkG7f0mBUeOOyMwyJx4CjQfMoZHyO";
+
 function cookieOptions(role) {
   // Les roles permanents (owner/teacher) ouvrent une session longue (7 jours) ;
   // le role rotatif "app" reste borne a la fenetre du mot de passe horaire.
@@ -60,7 +65,7 @@ router.post("/login", loginRateLimiter, async (req, res) => {
   if (typeof rawIdentifiant === "string" && rawIdentifiant.trim()) {
     const identifiant = rawIdentifiant.trim();
     const adminUser = findAdminUserByIdentifier(identifiant);
-    const passwordMatches = adminUser ? await bcrypt.compare(password, adminUser.passwordHash) : false;
+    const passwordMatches = await bcrypt.compare(password, adminUser?.passwordHash || dummyPasswordHash);
 
     if (!adminUser || !passwordMatches) {
       return res.status(401).json({ message: "Identifiant ou mot de passe invalide." });
@@ -141,7 +146,7 @@ router.put(
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe administrateur doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -154,11 +159,11 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe administrateur mis a jour avec succes." });
+    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
   }
 );
 
-// Auto-service : l'administrateur change lui-meme son mot de passe (notamment lors
+// Auto-service : l'enseignant change lui-meme son mot de passe (notamment lors
 // du changement impose apres la generation automatique d'un mot de passe).
 router.put(
   "/teacher-password/self",
@@ -171,7 +176,7 @@ router.put(
     try {
       newPassword = ensureSafeText(req.body?.newPassword, "Nouveau mot de passe", { min: 12, max: 256 });
     } catch {
-      return res.status(400).json({ message: "Le mot de passe administrateur doit contenir au moins 12 caracteres." });
+      return res.status(400).json({ message: "Le mot de passe enseignant doit contenir au moins 12 caracteres." });
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
@@ -184,7 +189,7 @@ router.put(
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
 
-    return res.json({ message: "Mot de passe administrateur mis a jour avec succes." });
+    return res.json({ message: "Mot de passe enseignant mis a jour avec succes." });
   }
 );
 

@@ -6,6 +6,12 @@ export default function UpdateProgressOverlay({ visible, status, onClose }) {
   const state = status?.state || {};
   const isError = state.status === "error";
   const isCompleted = !state.busy && state.status === "completed";
+  // "idle" : l'updater a conclu qu'il n'y avait rien a appliquer (ex. version
+  // choisie deja installee ou plus ancienne que l'actuelle). Ce n'est ni un
+  // succes ni une erreur, mais l'operation est bel et bien terminee : le
+  // popup ne doit pas rester bloque pour autant.
+  const isNoop = !state.busy && state.status === "idle";
+  const isFinished = isError || isCompleted || isNoop;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(248,250,252,0.82)] px-4 backdrop-blur-xl">
@@ -39,20 +45,33 @@ export default function UpdateProgressOverlay({ visible, status, onClose }) {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5 text-emerald-600">
               <path d="M20 6 9 17l-5-5" />
             </svg>
+          ) : isNoop ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5 text-slate-500">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 8v4l3 2" />
+            </svg>
           ) : (
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-200 border-t-slate-900" />
           )}
         </div>
 
         <h2 className="mt-5 text-center text-2xl font-semibold tracking-[-0.05em] text-slate-950">
-          {isError ? "Échec de la mise à jour" : isCompleted ? "Mise à jour terminée" : "Mise à jour en cours"}
+          {isError
+            ? "Échec de la mise à jour"
+            : isCompleted
+              ? "Mise à jour terminée"
+              : isNoop
+                ? "Rien à appliquer"
+                : "Mise à jour en cours"}
         </h2>
         <p className="mt-3 text-center text-sm leading-6 text-slate-500">
           {isError
             ? "Une sauvegarde de rollback a été créée avant l'opération : vous pouvez y revenir depuis la liste des sauvegardes."
             : isCompleted
               ? "La page va se recharger automatiquement pour afficher la nouvelle version."
-              : "L'application télécharge la nouvelle version, applique les fichiers puis redémarre les services."}
+              : isNoop
+                ? state.message || "Cette version ne nécessite aucune action."
+                : "L'application télécharge la nouvelle version, applique les fichiers puis redémarre les services."}
         </p>
 
         <div className="mt-6 rounded-[24px] border border-slate-200 bg-white p-4">
@@ -79,7 +98,7 @@ export default function UpdateProgressOverlay({ visible, status, onClose }) {
           </div>
         </div>
 
-        {isError || isCompleted ? (
+        {isFinished ? (
           <button type="button" className="soft-button mt-6 w-full justify-center" onClick={onClose}>
             Fermer
           </button>

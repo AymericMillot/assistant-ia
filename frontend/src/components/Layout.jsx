@@ -96,8 +96,19 @@ export default function Layout({ children }) {
 
         {children}
 
-        <footer className="flex flex-col gap-3 px-1 pt-2 text-[11px] font-medium uppercase tracking-[0.22em] text-slate-400 sm:flex-row sm:items-center sm:justify-between dark:text-slate-500">
+        <footer className="flex flex-col items-center gap-3 px-1 pt-2 text-center text-[11px] font-medium uppercase tracking-[0.22em] text-slate-400 sm:flex-row sm:justify-between sm:text-left dark:text-slate-500">
           <span>Version {version}</span>
+          <span>
+            Créé et entretenu par{" "}
+            <a
+              href="https://aymericmillot.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+            >
+              Aymeric Millot
+            </a>
+          </span>
           <Link
             to="/release"
             className="text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"

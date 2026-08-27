@@ -6,6 +6,63 @@ ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 COOKIE_FILE="$ROOT_DIR/fablab-admin-cookie.txt"
 
+os_release_field() {
+  local field="$1"
+  [[ -f /etc/os-release ]] || return 0
+  grep -E "^${field}=" /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '"'
+}
+
+# Installe Docker Engine via le depot apt officiel (Debian/Ubuntu). Essaie
+# d'abord le depot correspondant a la distribution detectee, puis se rabat
+# sur l'autre famille (Debian <-> Ubuntu) en cas d'echec (cle/depot invalide,
+# codename non supporte, etc.). Version courte, reutilisable, de la logique
+# d'install.sh : ne fait pas exit sur echec (appelant = doctor.sh, qui doit
+# pouvoir continuer les autres verifications), retourne juste 0/1.
+_install_docker_apt_repo() {
+  local distro="$1"
+  local codename="$2"
+  local keyring="/etc/apt/keyrings/docker.gpg"
+  local list_file="/etc/apt/sources.list.d/docker.list"
+
+  sudo rm -f "$list_file" "$keyring"
+  sudo apt-get update -y || return 1
+  sudo apt-get install -y ca-certificates curl gnupg || return 1
+  sudo install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL "https://download.docker.com/linux/${distro}/gpg" | sudo gpg --dearmor -o "$keyring" || return 1
+  sudo chmod a+r "$keyring"
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=${keyring}] https://download.docker.com/linux/${distro} ${codename} stable" \
+    | sudo tee "$list_file" >/dev/null
+  sudo apt-get update -y || return 1
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_docker_engine_via_apt() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local os_id os_id_like os_codename primary_distro fallback_distro
+  os_id="$(os_release_field ID)"
+  os_id_like="$(os_release_field ID_LIKE)"
+  os_codename="$(os_release_field VERSION_CODENAME)"
+
+  primary_distro="debian"
+  if [[ "$os_id" == "ubuntu" || "$os_id_like" == *ubuntu* ]]; then
+    primary_distro="ubuntu"
+  fi
+  fallback_distro="ubuntu"
+  [[ "$primary_distro" == "ubuntu" ]] && fallback_distro="debian"
+
+  if ! _install_docker_apt_repo "$primary_distro" "${os_codename:-stable}"; then
+    echo "Echec de l'installation via le depot ${primary_distro}, nouvelle tentative via le depot ${fallback_distro}..." >&2
+    if ! _install_docker_apt_repo "$fallback_distro" "${os_codename:-stable}"; then
+      return 1
+    fi
+  fi
+
+  command -v docker >/dev/null 2>&1
+}
+
 decode_env_value() {
   local value="$1"
   value="${value//\$\$/\$}"
@@ -53,6 +110,18 @@ update_env_value() {
   mv "$tmp_file" "$ENV_FILE"
 }
 
+generate_random_key() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import secrets; print(secrets.token_hex(32))"
+    return
+  fi
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
 ensure_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -94,6 +163,62 @@ require_docker() {
 
 docker_compose() {
   docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+# "docker compose up" peut echouer avec le code 125 (echec de la commande
+# docker/compose elle-meme, pas du conteneur) pour des raisons tres variees :
+# daemon Docker pas pleinement pret juste apres un demarrage/redemarrage,
+# cache de build corrompu, ressources epuisees. On retente jusqu'a 3 fois avec
+# un delai croissant (le cas le plus frequent se resout tout seul), et sinon
+# on affiche un diagnostic actionnable au lieu de laisser set -e tuer le
+# script sur un code de sortie brut sans explication.
+_docker_compose_up_with_retry() {
+  local -a up_args=("$@")
+  local attempt exit_code delay
+  local max_attempts=3
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    # Ne pas tester la commande directement dans le if : un "if" dont la
+    # condition echoue sans "else" remet $? a 0 une fois le bloc referme, ce
+    # qui rendrait le vrai code de sortie (125, etc.) illisible juste apres,
+    # et ferait retourner 0 (succes) a la fin malgre l'echec reel.
+    if docker_compose up -d "${up_args[@]}"; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+
+    if [[ "$exit_code" -eq 0 ]]; then
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      delay=$((attempt * 5))
+      echo "« docker compose up » a echoue (code ${exit_code}), nouvelle tentative dans ${delay}s (${attempt}/${max_attempts})..." >&2
+      sleep "$delay"
+      continue
+    fi
+
+    echo "« docker compose up » a echoue (code ${exit_code}) apres ${max_attempts} tentatives." >&2
+    if [[ "$exit_code" -eq 125 ]]; then
+      echo "Code 125 : la commande docker/compose elle-meme a echoue (pas le conteneur)." >&2
+      echo "Causes frequentes et verifications :" >&2
+      echo "  - Le daemon Docker n'est pas demarre ou pas encore pret : systemctl status docker (ou relancez Docker Desktop)." >&2
+      echo "  - Utilisateur non membre du groupe docker : sudo usermod -aG docker \$USER puis reconnectez-vous." >&2
+      echo "  - Espace disque insuffisant pour construire les images : df -h" >&2
+      echo "  - Cache de build corrompu : docker builder prune" >&2
+      echo "  - Conflit de port ou de conteneur existant : docker ps -a" >&2
+    fi
+    return "$exit_code"
+  done
+}
+
+docker_compose_up_build() {
+  _docker_compose_up_with_retry --build "$@"
+}
+
+docker_compose_up_required() {
+  _docker_compose_up_with_retry "$@"
 }
 
 wait_for_http() {
@@ -175,12 +300,14 @@ ${intro_message}
 - Application : http://localhost:${server_port}
 - Application reseau local : ${local_ip:+http://${local_ip}:${server_port}}
 - Admin : http://localhost:${server_port}/admin
-- Mot de passe admin : cd "${ROOT_DIR}" && ./password
+- Mot de passe admin : cd "${ROOT_DIR}" && ./password.sh
 
 Scripts utiles :
 - Installer : ./install.sh
-- Mot de passe temporaire admin : ./password
+- Mot de passe temporaire admin : ./password.sh
 - Mettre a jour : ./update.sh
+- Depanner le service de mise a jour : ./updater.sh
+- Diagnostiquer et reparer l'installation : ./doctor.sh
 - Voir la version installee : ./version.sh
 - Redemarrer : ./restart.sh
 - Arreter : ./stop.sh
@@ -221,7 +348,10 @@ json_field() {
 }
 
 ensure_updater_running() {
-  docker_compose up -d updater >/dev/null
+  if ! docker_compose_up_required updater; then
+    echo "Le service de mise a jour n'a pas pu demarrer." >&2
+    return 1
+  fi
 
   for attempt in $(seq 1 30); do
     if docker exec fablab-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then

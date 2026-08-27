@@ -18,15 +18,15 @@ const actionLabels = {
   "model.delete": "Suppression de modèle",
   "system.purge-all-data": "Suppression de toutes les données",
   "system.purge-conversations-feedback": "Suppression des conversations et feedbacks",
-  "auth.teacher-password-change": "Changement du mot de passe administrateur",
+  "auth.teacher-password-change": "Changement du mot de passe enseignant",
   "deployment.publish": "Publication d'une version",
   "update.apply": "Installation d'une mise à jour",
   "update.rollback": "Retour arrière (rollback)"
 };
 
 const roleLabels = {
-  owner: "Propriétaire",
-  teacher: "Administrateur",
+  owner: "Administration",
+  teacher: "Enseignant",
   app: "Mot de passe rotatif"
 };
 
@@ -74,7 +74,7 @@ export default function AuditLogManager() {
     <div className="space-y-6">
       <section className="panel px-6 py-6 sm:px-8">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500 dark:text-slate-400">
-          Réservé au propriétaire
+          Administration
         </p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
           Journal d'audit

@@ -7,8 +7,8 @@ export default function AccessGate({
   onAuthenticated,
   embedded = false,
   onCancel = null,
-  heading = "Acces admin.",
-  description = "Entrez le mot de passe temporaire pour ouvrir l'administration.",
+  heading = "Accès à l’administration",
+  description = "Entrez vos identifiants d’administration pour ouvrir cet espace.",
   submitLabel = "Continuer",
   showBackButton = true
 }) {
@@ -50,13 +50,13 @@ export default function AccessGate({
 
       <form className="mt-5 space-y-4" onSubmit={handleSubmit}>
         <label className="block text-sm font-medium text-slate-700">
-          Identifiant <span className="font-normal text-slate-400">(optionnel, pour un compte admin nomme)</span>
+          Identifiant <span className="font-normal text-slate-400">(optionnel, pour un compte admin nommé)</span>
           <input
             type="text"
             className="input mt-2"
             value={identifiant}
             onChange={(event) => setIdentifiant(event.target.value)}
-            placeholder="Laisser vide pour le mot de passe partage"
+            placeholder="Laisser vide pour un mot de passe partagé"
             autoComplete="username"
           />
         </label>
@@ -69,6 +69,7 @@ export default function AccessGate({
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             placeholder="Votre mot de passe"
+            autoComplete="current-password"
             autoFocus
           />
         </label>
@@ -80,7 +81,7 @@ export default function AccessGate({
         )}
 
         <button className="soft-button w-full justify-center" disabled={loading}>
-          {loading ? "Verification..." : submitLabel}
+          {loading ? "Vérification..." : submitLabel}
         </button>
 
         {onCancel ? (

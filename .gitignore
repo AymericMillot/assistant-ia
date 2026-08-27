@@ -1,16 +1,49 @@
+# --- Secrets et configuration locale ---
+# Ne jamais committer de vraies valeurs : seuls les *.example versionnés le sont.
 .env
-.DS_Store
-._*
-backend/node_modules
-frontend/node_modules
-updater/node_modules
+.env.*
+.env.*.local
+!.env.example
+!.env.publish.example
+fablab-admin-cookie.txt
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# --- Donnees d'instance (specifiques a un deploiement, jamais generiques) ---
 backend/data
 backend/logs
 backend/uploads
+*.sqlite
+*.sqlite3
+*.db
+
+# --- Dependances ---
+node_modules/
+backend/node_modules
+frontend/node_modules
+updater/node_modules
+
+# --- Builds et artefacts generes ---
 frontend/dist
 export
 release
 .update-backups
-fablab-admin-cookie.txt
-.env.publish
+
+# --- Outils locaux (non partages) ---
 .claude
+.vscode
+.idea
+*.swp
+*.swo
+
+# --- Systeme ---
+.DS_Store
+._*
+Thumbs.db
+
+# --- Logs ---
+*.log
+npm-debug.log*

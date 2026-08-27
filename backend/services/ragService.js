@@ -8,11 +8,12 @@ import { load as loadHtml } from "cheerio";
 import { Chroma } from "@langchain/community/vectorstores/chroma";
 import { Document } from "@langchain/core/documents";
 import { OllamaEmbeddings } from "@langchain/ollama";
+import { getActiveModel, getModelContextLength } from "./ollamaService.js";
 import { TokenTextSplitter } from "@langchain/textsplitters";
 import { ChromaClient } from "chromadb";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
-import xlsx from "xlsx";
+import ExcelJS from "exceljs";
 import {
   getDocumentById,
   getDocumentByRelativePath,
@@ -81,7 +82,7 @@ let embeddingsInstanceModel = null;
 function getEmbeddings() {
   const configuredEmbeddingModel = getSetting(
     "embeddingModel",
-    process.env.EMBEDDING_MODEL || "nomic-embed-text:latest"
+    process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest"
   );
   const embeddingModel = String(configuredEmbeddingModel || "").includes(":")
     ? configuredEmbeddingModel
@@ -208,31 +209,47 @@ async function readFileContent(absolutePath) {
   }
 
   if (extension === ".xlsx") {
-    const workbook = xlsx.read(await fs.readFile(absolutePath), { type: "buffer" });
-    return workbook.SheetNames.map((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      const rows = xlsx.utils.sheet_to_json(sheet, {
-        header: 1,
-        raw: false,
-        blankrows: false
+    const workbook = new ExcelJS.Workbook();
+    // La version npm de SheetJS ne fournit aucun correctif pour ses alertes
+    // de pollution de prototype/ReDoS. ExcelJS permet de conserver la lecture
+    // XLSX tout en bornant le travail effectue sur un classeur pathologique.
+    await workbook.xlsx.readFile(absolutePath, {
+      ignoreNodes: ["dataValidations", "extLst"]
+    });
+
+    const maxSheets = Number(process.env.XLSX_MAX_SHEETS || 30);
+    const maxRowsPerSheet = Number(process.env.XLSX_MAX_ROWS_PER_SHEET || 20_000);
+    const maxCellsPerRow = Number(process.env.XLSX_MAX_CELLS_PER_ROW || 200);
+    const sections = [];
+
+    workbook.worksheets.slice(0, maxSheets).forEach((worksheet) => {
+      const rows = [];
+      worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber > maxRowsPerSheet) {
+          return;
+        }
+
+        const cells = [];
+        row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
+          if (columnNumber <= maxCellsPerRow) {
+            const text = String(cell.text ?? "").trim();
+            if (text) {
+              cells.push(text);
+            }
+          }
+        });
+
+        if (cells.length > 0) {
+          rows.push(cells.join(" | "));
+        }
       });
 
-      const content = rows
-        .map((row) =>
-          Array.isArray(row)
-            ? row
-                .map((cell) => String(cell ?? "").trim())
-                .filter(Boolean)
-                .join(" | ")
-            : ""
-        )
-        .filter(Boolean)
-        .join("\n");
+      if (rows.length > 0) {
+        sections.push(`Feuille: ${worksheet.name}\n${rows.join("\n")}`);
+      }
+    });
 
-      return content ? `Feuille: ${sheetName}\n${content}` : "";
-    })
-      .filter(Boolean)
-      .join("\n\n");
+    return sections.join("\n\n");
   }
 
   if (extension === ".html" || extension === ".htm") {
@@ -1444,7 +1461,7 @@ Quand des personnalisations internes definissent ton nom, ta presentation, ton r
 Si une personnalisation contient une consigne de type "reponds exactement", applique-la mot pour mot.
 Ordre de priorite : 1. personnalisations internes, 2. feedbacks admin valides, 3. documents internes pertinents, 4. connaissance generale.
 Utilise ta connaissance generale seulement en secours si les ressources internes ne suffisent pas a produire une bonne reponse.
-Quand tu reponds surtout avec ta connaissance generale faute de contexte interne suffisant, indique clairement et brievement que la reponse est basee sur tes connaissances generales d'IA et qu'elle peut etre moins precise.
+Quand tu reponds surtout avec ta connaissance generale faute de contexte interne suffisant, reste prudent mais ne mentionne jamais explicitement que la reponse est basee sur l'IA, tes connaissances generales ou qu'elle pourrait etre moins fiable : reponds directement, sans annoncer cette nuance.
 Si la question est dans le domaine mais que tu n'as pas assez d'informations fiables, dis clairement que tu ne sais pas, invite a verifier aupres d'un professeur, d'un responsable d'atelier ou d'une personne competente, et propose a l'utilisateur de completer par une recherche sur Internet.
 Si le contexte interne contredit une connaissance generale, privilegie toujours le contexte interne pour ce sujet precis.
 N'invente pas de fait specifique aux documents internes quand il n'est pas present dans les extraits fournis.
@@ -1455,7 +1472,7 @@ Ne termine pas la reponse par une liste de sources : l'interface s'en charge.
 Reponds toujours en francais, meme si la question est posee dans une autre langue.
 N'utilise pas l'anglais sauf pour un terme technique indispensable ou un nom propre.
 ${carriesHistory ? "L'historique recent est pertinent pour cette reponse : tu peux t'y appuyer." : "Traite la question actuelle comme un nouveau sujet autonome. N'herite pas du theme des echanges precedents si la question actuelle change de sujet."}
-${hasInternalContext ? "Des informations internes pertinentes sont fournies ci-dessous : base-toi d'abord sur elles pour cadrer la reponse." : "Aucun contexte interne suffisamment pertinent n'est fourni : reponds avec prudence a partir de tes connaissances generales, en precisant brievement que cette partie est basee sur l'IA et peut etre moins precise."}
+${hasInternalContext ? "Des informations internes pertinentes sont fournies ci-dessous : base-toi d'abord sur elles pour cadrer la reponse." : "Aucun contexte interne suffisamment pertinent n'est fourni : reponds avec prudence a partir de tes connaissances generales, sans jamais mentionner explicitement que cette partie est basee sur l'IA ou moins fiable."}
 ${shortFollowUpQuestion ? "La question actuelle est une relance courte : appuie-toi d'abord sur le dernier echange utile avant d'elargir la reponse." : ""}
   `.trim();
 }
@@ -1631,7 +1648,7 @@ function buildWebSearchSuggestion(question) {
   }
 
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(safeQuestion.slice(0, 300))}`;
-  return `\n\nPour aller plus loin, vous pouvez vérifier sur Internet : ${searchUrl}`;
+  return `\n\nPour aller plus loin, vous pouvez vérifier sur Internet en [cliquant ici](${searchUrl}).`;
 }
 
 export function ensureGeneralAiDisclosure(answerText, visibleSources = [], retrieval = {}, question = "") {
@@ -1650,24 +1667,55 @@ export function ensureGeneralAiDisclosure(answerText, visibleSources = [], retri
       normalizedAnswerText
     );
 
-  // Pas d'avertissement quand la reponse s'appuie sur un contexte interne reel
-  // (documents prives, pieces jointes, personnalisations) meme sans source visible.
-  const prefix = alreadyDisclosed || retrieval?.hasRelevantContext
-    ? ""
-    : "Cette réponse est basée sur l'IA et peut être moins précise faute de source documentaire utilisée. ";
+  // Le prompt systeme (voir buildSystemInstruction / buildChatMessages) demande
+  // explicitement au modele de ne jamais annoncer qu'une reponse vient de ses
+  // connaissances generales ou qu'elle serait moins fiable : aucune mention de ce
+  // type n'est plus ajoutee ni conservee dans la reponse. Ce filet de securite
+  // retire toute auto-mention residuelle si le modele l'ecrit quand meme.
+  const disclaimerLeakPattern = /cette r[ée]ponse est bas[ée]e sur[^.]*pr[ée]cise[^.]*\.\s*/gi;
 
-  // Aucun document interne n'a fonde la reponse : on oriente l'utilisateur vers une
-  // recherche Internet pour verifier ou completer, sauf si un lien de recherche est deja present.
+  // Le prompt systeme demande deja au modele de dire explicitement qu'il ne sait
+  // pas quand ni le contexte interne ni sa connaissance generale ne suffisent
+  // (voir buildSystemInstruction). On ne propose donc une recherche Internet que
+  // si la reponse porte elle-meme cette marque d'incertitude : sinon la
+  // connaissance generale a suffi a repondre, et suggerer Google serait
+  // systematique/hors de propos (ex: une simple salutation).
+  const hasUncertaintyMarker =
+    /je ne sais pas|je n.?ai pas (d.?information|assez d.?information(s)?|trouve)|je ne dispose pas d.?information|je ne suis pas en mesure de|je ne peux pas( vous)? repondre|aucune information fiable|pas d.?information fiable/i.test(
+      normalizedAnswerText
+    );
+
+  // Cas frequent : le modele se contente du disclaimer "connaissances generales
+  // d'IA" sans y ajouter le moindre contenu (il n'a en realite rien a proposer).
+  // Une fois ce disclaimer retire, s'il ne reste presque rien, c'est le meme
+  // signal d'incertitude qu'un "je ne sais pas" explicite.
+  const contentWithoutDisclosure = normalizedAnswerText
+    .replace(/cette reponse est basee sur (l.?ia|mes connaissances generales d.?ia)[^.]*\.?/gi, "")
+    .trim();
+  const hasNoSubstantiveContent = alreadyDisclosed && contentWithoutDisclosure.length < 20;
+
+  // Aucun document interne n'a fonde la reponse ET le modele signale lui-meme
+  // ne pas savoir (ni contexte interne, ni connaissance generale utile) : on
+  // oriente l'utilisateur vers une recherche Internet, sauf si un lien de
+  // recherche est deja present dans la reponse.
   const shouldSuggestWebSearch =
     question &&
     !retrieval?.hasRelevantContext &&
+    (hasUncertaintyMarker || hasNoSubstantiveContent) &&
     !/https?:\/\/(www\.)?google\.[a-z.]+\/search/i.test(safeText) &&
     !isIdentityQuestion(question) &&
     !isCreationQuestion(question);
 
   const suffix = shouldSuggestWebSearch ? buildWebSearchSuggestion(question) : "";
 
-  return `${prefix}${safeText}${suffix}`;
+  // Le modele s'est contente du disclaimer sans jamais dire explicitement qu'il ne
+  // sait pas : on remplace ce corps quasi vide par une phrase claire plutot que de
+  // laisser une reponse qui a l'air incomplete/coupee.
+  const bodyText = hasNoSubstantiveContent
+    ? "Je ne sais pas répondre à cette question avec les informations dont je dispose."
+    : (safeText.replace(disclaimerLeakPattern, "").trim() || safeText);
+
+  return `${bodyText}${suffix}`;
 }
 
 function invalidateSearchCache(folderName = null) {
@@ -2529,7 +2577,7 @@ export async function retrieveContext(question, folderName = "all", history = []
   };
 }
 
-export function getConversationContextSummary(history = []) {
+export async function getConversationContextSummary(history = [], modelName) {
   const limit = getConversationHistoryLimit();
   const recentHistory = getRecentConversationEntries(history, limit);
   const characters = recentHistory.reduce(
@@ -2537,11 +2585,16 @@ export function getConversationContextSummary(history = []) {
     0
   );
 
+  const resolvedModelName = modelName || getActiveModel();
+  const modelContextWindow = await getModelContextLength(resolvedModelName);
+
   return {
     usedMessages: recentHistory.length,
     limit,
     characters,
-    maxCharacters: maxConversationCharacters
+    maxCharacters: maxConversationCharacters,
+    modelName: resolvedModelName,
+    modelContextWindow
   };
 }
 
@@ -2657,7 +2710,7 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
     messages.push({
       role: "system",
       content:
-        "Comme aucun contexte interne suffisamment pertinent n'a ete trouve, si tu reponds quand meme, ajoute une mention breve du type : 'Cette reponse est basee sur mes connaissances generales d'IA et peut etre moins precise.'"
+        "Comme aucun contexte interne suffisamment pertinent n'a ete trouve, si tu reponds quand meme a partir de tes connaissances generales, ne l'annonce jamais explicitement (aucune mention du type 'cette reponse est basee sur l'IA' ou 'peut etre moins precise')."
     });
   }
 

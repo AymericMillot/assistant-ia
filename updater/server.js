@@ -14,7 +14,7 @@ app.use(express.json({ limit: "2mb" }));
 const workspaceDir = process.env.UPDATE_WORKSPACE_DIR || "/workspace";
 const updateConfigPath = process.env.UPDATE_CONFIG_PATH || path.join(workspaceDir, "update.config.json");
 const versionFilePath = process.env.VERSION_FILE_PATH || path.join(workspaceDir, "version.json");
-const port = Number(process.env.UPDATE_PORT || 3010);
+const port = Number(process.env.UPDATE_PORT || process.env.PORT || 3010);
 const backupStoreDir = path.join(workspaceDir, ".update-backups");
 const maxBackupVersions = Math.max(1, Number(process.env.UPDATE_BACKUP_RETENTION || 3));
 const composeProjectName =
@@ -1366,7 +1366,7 @@ async function rollbackToBackupInBackground(backupId) {
 
 /**
  * Export et publication de la version en cours d'edition (ce workspace) vers
- * le serveur de mise a jour distant. Reserve au role "owner" cote backend.
+ * le serveur de mise à jour distant.
  */
 // Les identifiants peuvent venir du backend (stockage chiffre en base, transmis
 // sur le reseau Docker interne uniquement) plutot que des variables d'environnement
@@ -1377,6 +1377,13 @@ function getDeployFtpConfig(override = {}) {
     user: String(override.user ?? process.env.DEPLOY_FTP_USER ?? "").trim(),
     password: String(override.password ?? process.env.DEPLOY_FTP_PASSWORD ?? "").trim(),
     remoteDir: String(override.remoteDir ?? process.env.DEPLOY_FTP_REMOTE_DIR ?? "")
+      .trim()
+      .replace(/^\/+|\/+$/g, ""),
+    // Dossier ou est deposee la derniere version en .zip sous un nom fixe
+    // (fablab-ai.zip), pour l'installation web en une commande - separe du
+    // dossier versionne ci-dessus. Par defaut, un niveau au-dessus de
+    // remoteDir (ex: remoteDir "iutlab/maj" -> latestZipDir "iutlab").
+    latestZipDir: String(override.latestZipDir ?? process.env.DEPLOY_LATEST_ZIP_DIR ?? "")
       .trim()
       .replace(/^\/+|\/+$/g, ""),
     publicBaseUrl: String(override.publicBaseUrl ?? process.env.DEPLOY_PUBLIC_BASE_URL ?? "")
@@ -1427,15 +1434,26 @@ async function buildExportArchive(version) {
   await ensureDir(exportRoot);
   const archiveName = `fablab-ai-v${version}.tar.gz`;
   const archivePath = path.join(exportRoot, archiveName);
-  const workspaceParent = path.dirname(workspaceDir);
-  const workspaceBaseName = path.basename(workspaceDir);
 
   const excludeArgs = exportExcludes.map((entry) => `--exclude=${entry}`);
 
+  // L'archive doit contenir un dossier "fablab-ai/" au sommet (pas de fichiers
+  // en vrac, et surtout pas "workspace/" : workspaceDir vaut toujours
+  // "/workspace" a l'interieur du conteneur, peu importe le nom reel du
+  // dossier hote). --transform renomme le prefixe "./" en "composeProjectName/"
+  // a la volee pendant l'archivage, sans avoir a dupliquer les fichiers.
   await new Promise((resolve, reject) => {
     const child = spawn(
       "tar",
-      [...excludeArgs, "-czf", archivePath, "-C", workspaceParent, workspaceBaseName],
+      [
+        ...excludeArgs,
+        `--transform=s,^\\.\\(/\\|$\\),${composeProjectName}\\1,`,
+        "-czf",
+        archivePath,
+        "-C",
+        workspaceDir,
+        "."
+      ],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
     child.stdout.on("data", (chunk) => pushDeployLog(chunk.toString().trim()));
@@ -1451,6 +1469,55 @@ async function buildExportArchive(version) {
   });
 
   return { exportRoot, archivePath, archiveName };
+}
+
+// Reconstruit un .zip identique au .tar.gz deja construit (memes exclusions,
+// deja appliquees dans l'archive) : extraction dans un dossier temporaire
+// puis rezippage, pour ne pas dupliquer la liste d'exclusions. Sert au fichier
+// "derniere version" (fablab-ai.zip) attendu par l'installation web en une
+// commande (irm ... | iex, voir web-install.ps1), qui n'a pas d'equivalent
+// tar.gz cote client Windows.
+async function buildExportZip(exportRoot, archivePath, version) {
+  const zipName = `fablab-ai-v${version}.zip`;
+  const zipPath = path.join(exportRoot, zipName);
+  const stagingDir = await fsp.mkdtemp(path.join(os.tmpdir(), "fablab-zip-"));
+
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("tar", ["-xzf", archivePath, "-C", stagingDir], { stdio: ["ignore", "pipe", "pipe"] });
+      child.stderr.on("data", (chunk) => pushDeployLog(chunk.toString().trim()));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`Extraction pour construire le zip impossible (code ${code}).`));
+      });
+    });
+
+    await fsp.rm(zipPath, { force: true });
+
+    await new Promise((resolve, reject) => {
+      const child = spawn("zip", ["-rq", "-X", zipPath, "."], {
+        cwd: stagingDir,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      child.stderr.on("data", (chunk) => pushDeployLog(chunk.toString().trim()));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`Construction du zip impossible (code ${code}).`));
+      });
+    });
+  } finally {
+    await fsp.rm(stagingDir, { recursive: true, force: true });
+  }
+
+  return { zipPath, zipName };
 }
 
 async function uploadFileViaFtps(localPath, remoteUrl, ftpConfig) {
@@ -1529,6 +1596,9 @@ async function runExportPublishInBackground({ version, notes, ftpConfigOverride 
     const { exportRoot, archivePath, archiveName } = await buildExportArchive(version);
     pushDeployLog(`Archive construite : ${archiveName}.`);
 
+    const { zipPath, zipName } = await buildExportZip(exportRoot, archivePath, version);
+    pushDeployLog(`Archive zip construite : ${zipName}.`);
+
     setDeployState({ status: "hashing", progress: 30, message: "Calcul de l'empreinte SHA256..." });
     const sha256 = await sha256OfFile(archivePath);
     pushDeployLog(`SHA256 : ${sha256}.`);
@@ -1551,6 +1621,20 @@ async function runExportPublishInBackground({ version, notes, ftpConfigOverride 
     pushDeployLog("Manifest envoye.");
     await uploadFileViaFtps(path.join(exportRoot, "release-notes.txt"), `${remoteBase}/release-notes.txt`, ftpConfig);
     pushDeployLog("Notes de version envoyees.");
+
+    // Copie "derniere version" sous un nom fixe (fablab-ai.zip), toujours au meme
+    // endroit et toujours ecrasee : c'est ce que telecharge l'installation web en
+    // une commande (irm ... | iex), qui n'a aucun moyen de connaitre le numero de
+    // version a l'avance et ne doit jamais avoir a etre mise a jour manuellement.
+    const latestZipDir = ftpConfig.latestZipDir || path.posix.dirname(`/${ftpConfig.remoteDir}`).replace(/^\/+/, "");
+    if (latestZipDir && latestZipDir !== ".") {
+      await uploadFileViaFtps(zipPath, `ftp://${ftpConfig.host}/${latestZipDir}/fablab-ai.zip`, ftpConfig);
+      pushDeployLog(`fablab-ai.zip mis a jour dans ${latestZipDir}/ (toujours la derniere version).`);
+    } else {
+      pushDeployLog(
+        "Attention : impossible de determiner le dossier de fablab-ai.zip (DEPLOY_FTP_REMOTE_DIR trop court) - non mis a jour."
+      );
+    }
 
     setDeployState({ status: "verifying", progress: 85, message: "Verification de l'acces public HTTPS..." });
     const publicUrl = ftpConfig.publicBaseUrl ? `${ftpConfig.publicBaseUrl}/${version}` : null;

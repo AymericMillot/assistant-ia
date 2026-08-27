@@ -467,24 +467,25 @@
         <h3>Installation</h3>
         <pre><code>cd fablab-ai
 ./install.sh</code></pre>
-        <p>Le script installe Docker si besoin, construit les images, télécharge un modèle d'IA adapté à la machine, démarre tous les services, puis génère un mot de passe administrateur initial.</p>
+        <p>Le script installe Docker si besoin, construit les images, télécharge un modèle d'IA adapté à la machine, démarre tous les services, puis génère un mot de passe enseignant initial.</p>
 
         <h3>Premier accès</h3>
         <ul>
           <li><strong>Utilisateurs</strong> : <code>http://&lt;adresse-du-serveur&gt;:3000</code></li>
           <li><strong>Administration</strong> : <code>http://&lt;adresse-du-serveur&gt;:3000/admin</code></li>
-          <li>Mot de passe temporaire (valable une heure, en secours) : lancez <code>./password</code> sur le serveur.</li>
+          <li>Mot de passe temporaire (valable une heure, en secours) : lancez <code>./password.sh</code> sur le serveur.</li>
         </ul>
       </section>
 
       <section class="card" id="quotidien" data-searchable>
         <h2>💬 Utilisation au quotidien</h2>
-        <p class="lead">Ce que voient les utilisateurs et ce que gèrent les administrateurs.</p>
+        <p class="lead">Ce que voient les utilisateurs et ce que gèrent les enseignants.</p>
         <ul>
           <li>La page d'accueil permet de poser une question en langage naturel ; l'assistant répond en s'appuyant sur les documents indexés.</li>
           <li>Les échanges ne sont pas conservés après fermeture de la page (confidentialité).</li>
           <li>Un pouce 👍/👎 sur chaque réponse aide l'assistant à s'améliorer au fil du temps.</li>
-          <li>Une pièce jointe (texte) peut être envoyée par un utilisateur pour enrichir le contexte d'une question ponctuelle.</li>
+          <li>Une pièce jointe (texte ou PDF) peut être envoyée par un utilisateur pour enrichir le contexte d'une question ponctuelle — l'administrateur peut désactiver cette possibilité depuis l'onglet Pièces jointes.</li>
+          <li>Quand l'assistant n'a ni document interne ni connaissance générale fiable pour répondre, il le dit clairement ("je ne sais pas...") et propose un lien de recherche externe, plutôt que d'inventer une réponse ou de suggérer systématiquement une recherche Internet.</li>
         </ul>
       </section>
 
@@ -494,13 +495,13 @@
         <table class="scripts">
           <thead><tr><th>Commande</th><th>Rôle</th></tr></thead>
           <tbody>
-            <tr><td><code>./install.sh</code></td><td>Première installation complète (Docker, modèles, services).</td></tr>
+            <tr><td><code>./install.sh</code></td><td>Première installation complète (Docker, modèles, services). <code>./install.sh --v1.000</code> installe une version précise récupérée depuis le serveur de mise à jour.</td></tr>
             <tr><td><code>./restart.sh</code></td><td>Redémarre tous les services.</td></tr>
             <tr><td><code>./stop.sh</code></td><td>Arrête tous les services proprement.</td></tr>
             <tr><td><code>./update.sh</code></td><td>Vérifie et applique une mise à jour distante, ou reconstruit depuis les fichiers locaux.</td></tr>
             <tr><td><code>./version.sh</code></td><td>Affiche la version installée et si une mise à jour est disponible.</td></tr>
             <tr><td><code>./reset.sh</code></td><td>Réinitialise entièrement l'instance (données + paramètres).</td></tr>
-            <tr><td><code>./password</code></td><td>Affiche le mot de passe temporaire courant (valable une heure).</td></tr>
+            <tr><td><code>./password.sh</code></td><td>Affiche le mot de passe temporaire courant (valable une heure).</td></tr>
             <tr><td><code>./export.sh</code></td><td>Crée une archive versionnée du projet, prête à déployer ailleurs.</td></tr>
             <tr><td><code>./help.sh</code></td><td>Ouvre cette page d'aide.</td></tr>
           </tbody>
@@ -515,7 +516,13 @@
         <p>Ajoutez vos fichiers (PDF, Word, Excel, HTML...) depuis l'onglet Documents : ils sont automatiquement découpés, vectorisés et indexés pour la recherche.</p>
 
         <h3>Modèles</h3>
-        <p>Changez le modèle de conversation depuis l'onglet Modèles.</p>
+        <p>Changez le modèle de conversation depuis l'onglet Modèles. Les modèles Mistral AI (Mistral, Mixtral, Codestral, Ministral, Devstral, Pixtral, Magistral) sont repérés par un petit drapeau français.</p>
+
+        <h3>Pièces jointes</h3>
+        <p>L'onglet Pièces jointes permet d'activer ou de désactiver globalement la possibilité pour les utilisateurs de joindre un fichier dans le chat, et de trier (conserver ou supprimer) les fichiers déjà envoyés.</p>
+
+        <h3>Export et déploiement</h3>
+        <p>La note de version se pré-remplit automatiquement (date, heure, numéro de version) et reste enregistrée dans le navigateur tant que la version n'est pas publiée — vous n'avez jamais besoin d'écrire quelque chose à la main pour publier.</p>
 
         <h3>Sauvegarde</h3>
         <p>Les données vivent dans <code>backend/data</code> (base) et <code>backend/uploads</code> (fichiers). Pensez à les sauvegarder régulièrement si l'instance contient des documents importants.</p>

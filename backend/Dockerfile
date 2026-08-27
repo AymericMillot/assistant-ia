@@ -3,7 +3,7 @@ FROM node:24-alpine AS frontend-build
 WORKDIR /workspace/frontend
 
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY frontend/ ./
 RUN npm run build
@@ -17,7 +17,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY backend/package*.json ./
-RUN npm install
+RUN npm ci --omit=dev
 
 COPY backend/ ./
 COPY --from=frontend-build /workspace/frontend/dist /app/public

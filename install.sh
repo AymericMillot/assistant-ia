@@ -3,6 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# $USER n'est pas toujours exporte (ex: session via "docker exec", certains
+# environnements SSH/cloud minimalistes) : sans repli, set -u fait planter le
+# script des la premiere utilisation. "id -un" est disponible partout.
+USER="${USER:-$(id -un)}"
+
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 DEPLOYMENT_INFO_FILE="$ROOT_DIR/backend/data/deployment.json"
@@ -21,6 +27,212 @@ for arg in "$@"; do
 done
 if [[ ! -t 0 ]]; then
   NON_INTERACTIVE=1
+fi
+
+# Une flotte peut injecter une valeur locale sans la placer dans le depot ni
+# dans la ligne de commande. Le fichier la contient sur sa première ligne.
+OWNER_PASSWORD_FILE="${FABLAB_OWNER_PASSWORD_FILE:-}"
+for ((arg_index = 0; arg_index < ${#SCRIPT_ARGS[@]}; arg_index++)); do
+  if [[ "${SCRIPT_ARGS[$arg_index]}" == "--owner-password-file" ]]; then
+    next_index=$((arg_index + 1))
+    if [[ "$next_index" -ge "${#SCRIPT_ARGS[@]}" || -z "${SCRIPT_ARGS[$next_index]}" ]]; then
+      echo "L'option de fichier de secret attend un chemin." >&2
+      exit 1
+    fi
+    OWNER_PASSWORD_FILE="${SCRIPT_ARGS[$next_index]}"
+  fi
+done
+
+# Installation d'une version specifique : ./install.sh --v1.000 recupere cette
+# version precise depuis le serveur de mise a jour (update.config.json) avant
+# de poursuivre l'installation normale, plutot que d'utiliser les fichiers
+# locaux courants.
+REQUESTED_VERSION=""
+for arg in "$@"; do
+  if [[ "$arg" =~ ^--v([0-9][0-9A-Za-z.]*)$ ]]; then
+    REQUESTED_VERSION="${BASH_REMATCH[1]}"
+  fi
+done
+
+json_string_field_from_file() {
+  local file="$1"
+  local field="$2"
+  [[ -f "$file" ]] || return 1
+  grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$file" \
+    | head -n 1 \
+    | sed -E "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"/\1/"
+}
+
+compute_sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Reessaie une operation dependante d'Internet (telechargement, pull d'image Docker,
+# telechargement de modele Ollama...) en cas de coupure reseau temporaire pendant
+# l'installation, plutot que d'abandonner immediatement. Jusqu'a 10 tentatives, avec
+# une attente entre chacune pour laisser le temps a la connexion de revenir.
+# Si la commande retourne un code 2, l'echec n'est PAS lie au reseau (ex: espace
+# disque insuffisant) : reessayer ne changerait rien, on abandonne tout de suite.
+retry_on_network_failure() {
+  local description="$1"
+  shift
+  local max_attempts=10
+  local delay_seconds=15
+  local attempt status
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    # Ne pas tester "$@" directement dans le if : un "if" dont la condition
+    # echoue sans "else" remet $? a 0 une fois le bloc referme, ce qui rendrait
+    # le code de sortie reel (ex: 2 pour "pas la peine de reessayer") illisible
+    # juste apres.
+    if "$@"; then
+      status=0
+    else
+      status=$?
+    fi
+
+    if [[ "$status" -eq 0 ]]; then
+      return 0
+    fi
+
+    if [[ "$status" -eq 2 ]]; then
+      return 2
+    fi
+
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      break
+    fi
+
+    echo "${description} a echoue (tentative ${attempt}/${max_attempts}), coupure Internet possible. Nouvelle tentative dans ${delay_seconds}s..." >&2
+    sleep "$delay_seconds"
+  done
+
+  echo "${description} a echoue apres ${max_attempts} tentatives. Verifiez votre connexion Internet et relancez ./install.sh." >&2
+  return 1
+}
+
+# Telecharge, verifie (SHA256) et applique une version precise depuis le
+# serveur de mise a jour distant, puis relance install.sh (desormais a jour)
+# pour poursuivre l'installation normalement avec ces fichiers.
+install_requested_version() {
+  local version="$1"
+
+  if [[ -n "${FABLAB_VERSION_APPLIED:-}" ]]; then
+    return 0
+  fi
+
+  echo "==> Recuperation de la version ${version} depuis le serveur de mise a jour..." >&2
+
+  local update_config_file="$ROOT_DIR/update.config.json"
+  if [[ ! -f "$update_config_file" ]]; then
+    echo "update.config.json introuvable : impossible de recuperer une version specifique." >&2
+    exit 1
+  fi
+
+  local base_url version_file_name package_template
+  base_url="$(json_string_field_from_file "$update_config_file" "baseUrl")"
+  version_file_name="$(json_string_field_from_file "$update_config_file" "versionFile")"
+  package_template="$(json_string_field_from_file "$update_config_file" "packageFileTemplate")"
+  version_file_name="${version_file_name:-version.json}"
+
+  if [[ -z "$base_url" || -z "$package_template" ]]; then
+    echo "Configuration du serveur de mise a jour incomplete (update.config.json)." >&2
+    exit 1
+  fi
+
+  local version_url package_name package_url
+  version_url="${base_url%/}/${version}/${version_file_name}"
+  package_name="${package_template//\{version\}/$version}"
+  package_url="${base_url%/}/${version}/${package_name}"
+
+  local temp_root
+  temp_root="$(mktemp -d)"
+  trap 'rm -rf "$temp_root"' EXIT
+
+  echo "    Verification de la version distante..." >&2
+  local manifest_path="$temp_root/version.json"
+  if ! retry_on_network_failure "Verification de la version distante" \
+    curl -fsSL "$version_url" -o "$manifest_path"; then
+    echo "Version ${version} introuvable sur le serveur de mise a jour (${version_url})." >&2
+    exit 1
+  fi
+
+  local remote_version remote_sha256
+  remote_version="$(json_string_field_from_file "$manifest_path" "version")"
+  remote_sha256="$(json_string_field_from_file "$manifest_path" "sha256")"
+
+  if [[ "$remote_version" != "$version" ]]; then
+    echo "La version distante annoncee (${remote_version:-inconnue}) ne correspond pas a ${version} demandee." >&2
+    exit 1
+  fi
+
+  echo "    Telechargement de ${package_name}..." >&2
+  local archive_path="$temp_root/package.tar.gz"
+  if ! retry_on_network_failure "Telechargement de ${package_name}" \
+    curl -fsSL "$package_url" -o "$archive_path"; then
+    echo "Impossible de telecharger le package : ${package_url}" >&2
+    exit 1
+  fi
+
+  if [[ -n "$remote_sha256" ]]; then
+    echo "    Verification de l'integrite (SHA256)..." >&2
+    local computed_sha computed_sha_lower remote_sha256_lower
+    computed_sha="$(compute_sha256_file "$archive_path")"
+    # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
+    # cette syntaxe de minification introduite en bash 4.
+    computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
+    remote_sha256_lower="$(printf '%s' "$remote_sha256" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$computed_sha_lower" != "$remote_sha256_lower" ]]; then
+      echo "La verification SHA256 du package a echoue : version corrompue ou incidente." >&2
+      exit 1
+    fi
+  else
+    echo "Attention : le manifest ne fournit pas de somme SHA256, integrite non verifiee." >&2
+  fi
+
+  echo "    Preparation des fichiers..." >&2
+  local extract_root="$temp_root/extract"
+  mkdir -p "$extract_root"
+  tar -xzf "$archive_path" -C "$extract_root"
+
+  local package_root="$extract_root"
+  if [[ ! -f "$package_root/docker-compose.yml" ]]; then
+    local candidate
+    for candidate in "$extract_root"/*; do
+      if [[ -d "$candidate" && -f "$candidate/docker-compose.yml" ]]; then
+        package_root="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ ! -f "$package_root/docker-compose.yml" ]]; then
+    echo "Le package telecharge est incomplet (docker-compose.yml introuvable)." >&2
+    exit 1
+  fi
+
+  echo "    Application des fichiers de la version ${version}..." >&2
+  local rsync_args=(-a --delete)
+  local preserve_path
+  for preserve_path in .env update.config.json backend/uploads backend/logs backend/data .git .update-backups fablab-admin-cookie.txt export release .claude; do
+    rsync_args+=("--exclude=/${preserve_path}")
+  done
+  rsync "${rsync_args[@]}" "$package_root"/ "$ROOT_DIR"/
+
+  rm -rf "$temp_root"
+  trap - EXIT
+
+  echo "==> Version ${version} installee. Poursuite de l'installation..." >&2
+  export FABLAB_VERSION_APPLIED=1
+  exec "$0" "${SCRIPT_ARGS[@]}"
+}
+
+if [[ -n "$REQUESTED_VERSION" ]]; then
+  install_requested_version "$REQUESTED_VERSION"
 fi
 
 detect_os_label() {
@@ -223,6 +435,11 @@ check_docker() {
 check_port_available() {
   local port="$1"
   if command -v lsof >/dev/null 2>&1 && lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep -qx running \
+      && docker port fablab-backend "${port}/tcp" 2>/dev/null | grep -Eq ":${port}$"; then
+      echo "Le port ${port} est deja utilise par l'installation FablabAI en cours : reutilisation normale."
+      return 0
+    fi
     echo "Le port ${port} est deja utilise par un autre processus." >&2
     echo "-> Changez PORT dans .env, ou arretez le processus qui occupe ce port." >&2
     exit 1
@@ -334,6 +551,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   echo "Fichier .env cree a partir de .env.example"
 fi
+chmod 600 "$ENV_FILE" 2>/dev/null || true
 
 current_encryption_key="$(get_env_value "CONFIG_ENCRYPTION_KEY")"
 if [[ -z "$current_encryption_key" ]]; then
@@ -341,14 +559,43 @@ if [[ -z "$current_encryption_key" ]]; then
   update_env "CONFIG_ENCRYPTION_KEY" "$(generate_random_key)"
 fi
 
-current_hash="$(get_env_value "ADMIN_PASSWORD_HASH")"
-current_hash_raw="$(get_env_raw "ADMIN_PASSWORD_HASH")"
+# JWT_SECRET et APP_PASSWORD_SEED sont fournis avec une valeur d'exemple non
+# vide dans .env.example (pas juste vide comme CONFIG_ENCRYPTION_KEY) : sans
+# cette regeneration, une installation fraiche demarrerait avec un secret JWT
+# et une graine de mot de passe rotatif previsibles et identiques a toutes
+# les autres installations n'ayant pas encore ete personnalisees.
+current_jwt_secret="$(get_env_value "JWT_SECRET")"
+if [[ -z "$current_jwt_secret" || "$current_jwt_secret" == "changeme_secret_jwt_tres_long" ]]; then
+  echo "Generation de JWT_SECRET (signature des sessions)..."
+  update_env "JWT_SECRET" "$(generate_random_key)"
+fi
 
-if [[ -n "$current_hash" ]]; then
-  normalized_hash="$(normalize_env_value "$current_hash")"
-  if [[ "$current_hash_raw" != "$normalized_hash" ]]; then
-    update_env "ADMIN_PASSWORD_HASH" "$current_hash"
+current_password_seed="$(get_env_value "APP_PASSWORD_SEED")"
+if [[ -z "$current_password_seed" || "$current_password_seed" == "change_me_seed_tres_long_et_prive" ]]; then
+  echo "Generation de APP_PASSWORD_SEED (mot de passe admin rotatif)..."
+  update_env "APP_PASSWORD_SEED" "$(generate_random_key)"
+fi
+
+current_owner_password="$(get_env_value "OWNER_BOOTSTRAP_PASSWORD")"
+if [[ -n "$OWNER_PASSWORD_FILE" ]]; then
+  if [[ ! -r "$OWNER_PASSWORD_FILE" ]]; then
+    echo "Fichier de configuration illisible : $OWNER_PASSWORD_FILE" >&2
+    exit 1
   fi
+  IFS= read -r current_owner_password < "$OWNER_PASSWORD_FILE" || true
+  current_owner_password="${current_owner_password%$'\r'}"
+  if [[ ${#current_owner_password} -lt 16 ]]; then
+    echo "Le secret fourni doit contenir au moins 16 caracteres." >&2
+    exit 1
+  fi
+  update_env "OWNER_BOOTSTRAP_PASSWORD" "$current_owner_password"
+elif [[ -z "$current_owner_password" ]]; then
+  echo "Generation de la configuration locale securisee..."
+  current_owner_password="$(generate_random_key)"
+  update_env "OWNER_BOOTSTRAP_PASSWORD" "$current_owner_password"
+elif [[ ${#current_owner_password} -lt 16 ]]; then
+  echo "La valeur de configuration doit contenir au moins 16 caracteres." >&2
+  exit 1
 fi
 
 DEFAULT_MODEL_VALUE="$(get_env_value "DEFAULT_MODEL")"
@@ -357,7 +604,7 @@ FALLBACK_MODELS_VALUE="$(get_env_value "OLLAMA_FALLBACK_MODELS")"
 FALLBACK_MODEL_VALUE="$(get_env_value "OLLAMA_FALLBACK_MODEL")"
 
 DEFAULT_MODEL="${DEFAULT_MODEL_VALUE:-gemma2:2b}"
-EMBEDDING_MODEL="${EMBEDDING_MODEL_VALUE:-nomic-embed-text}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL_VALUE:-nomic-embed-text-v2-moe:latest}"
 FALLBACK_MODELS_RAW="${FALLBACK_MODELS_VALUE:-${FALLBACK_MODEL_VALUE:-}}"
 PORT_VALUE="$(get_env_value "PORT")"
 SERVER_PORT="${PORT_VALUE:-3000}"
@@ -391,6 +638,51 @@ build_service_or_reuse_local() {
   return 1
 }
 
+# "docker compose up" peut echouer avec le code 125 (echec de la commande
+# docker/compose elle-meme, pas du conteneur) pour des raisons variees :
+# daemon Docker pas encore pret, cache de build corrompu, ressources
+# epuisees. On retente avec un delai croissant avant d'abandonner.
+docker_compose_up_service_required() {
+  local service_name="$1"
+  local attempt exit_code delay
+  local max_attempts=3
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    # Ne pas tester la commande directement dans le if : un "if" dont la
+    # condition echoue sans "else" remet $? a 0 une fois le bloc referme, ce
+    # qui rendrait le vrai code de sortie (125, etc.) illisible juste apres,
+    # et ferait retourner 0 (succes) a la fin malgre l'echec reel.
+    if docker compose -f "$ROOT_DIR/docker-compose.yml" up -d "$service_name"; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+
+    if [[ "$exit_code" -eq 0 ]]; then
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      delay=$((attempt * 5))
+      echo "« docker compose up ${service_name} » a echoue (code ${exit_code}), nouvelle tentative dans ${delay}s (${attempt}/${max_attempts})..." >&2
+      sleep "$delay"
+      continue
+    fi
+
+    echo "« docker compose up ${service_name} » a echoue (code ${exit_code}) apres ${max_attempts} tentatives." >&2
+    if [[ "$exit_code" -eq 125 ]]; then
+      echo "Code 125 : la commande docker/compose elle-meme a echoue (pas le conteneur)." >&2
+      echo "Causes frequentes et verifications :" >&2
+      echo "  - Le daemon Docker n'est pas demarre ou pas encore pret : systemctl status docker (ou relancez Docker Desktop)." >&2
+      echo "  - Utilisateur non membre du groupe docker : sudo usermod -aG docker \$USER puis reconnectez-vous." >&2
+      echo "  - Espace disque insuffisant pour construire les images : df -h" >&2
+      echo "  - Cache de build corrompu : docker builder prune" >&2
+      echo "  - Conflit de port ou de conteneur existant : docker ps -a" >&2
+    fi
+    return "$exit_code"
+  done
+}
+
 mkdir -p \
   "$ROOT_DIR/backend/uploads/machines" \
   "$ROOT_DIR/backend/uploads/securite" \
@@ -403,18 +695,40 @@ check_port_available "$SERVER_PORT"
 check_disk_space
 
 echo "Construction de l'image backend pour generer le hash bcrypt..."
-build_service_or_reuse_local "backend" "$BACKEND_IMAGE_NAME"
+retry_on_network_failure "Construction de l'image backend" \
+  build_service_or_reuse_local "backend" "$BACKEND_IMAGE_NAME"
 
-if [[ -z "$current_hash" ]]; then
-  echo "Generation du hash bcrypt du mot de passe admin initial..."
-  generated_hash="$(
-    docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps backend \
-      node --input-type=module -e "import bcrypt from 'bcrypt'; const hash = await bcrypt.hash('1234567890', 12); console.log(hash);"
-  )"
-  update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
-else
-  echo "ADMIN_PASSWORD_HASH deja defini, conservation de la valeur existante."
-fi
+echo "Generation des protections d'authentification..."
+generated_hash="$(
+  docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps backend \
+    node --input-type=module -e "import bcrypt from 'bcrypt'; const hash = await bcrypt.hash(process.env.OWNER_BOOTSTRAP_PASSWORD, 12); console.log(hash);"
+)"
+update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
+
+# Lit une reponse interactive avec un delai maximum de 10 minutes : au-dela,
+# on considere qu'il n'y a plus personne devant l'ecran (installation lancee a
+# distance, coupure...) et on bascule sur les valeurs par defaut pour tout le
+# reste de l'installation, plutot que de rester bloque sur chaque question
+# suivante encore 10 minutes de plus.
+INSTALL_PROMPTS_TIMED_OUT=0
+timed_read() {
+  local prompt="$1"
+  local var_name="$2"
+
+  if [[ "$INSTALL_PROMPTS_TIMED_OUT" -eq 1 ]]; then
+    printf -v "$var_name" '%s' ""
+    return 0
+  fi
+
+  if ! read -r -t 600 -p "$prompt" "$var_name"; then
+    echo
+    echo "Aucune reponse apres 10 minutes : la suite de l'installation utilisera les valeurs par defaut." >&2
+    INSTALL_PROMPTS_TIMED_OUT=1
+    printf -v "$var_name" '%s' ""
+  fi
+
+  return 0
+}
 
 # Personnalisation interactive (nom du projet, modele Ollama). Sautee en mode
 # non interactif : les valeurs par defaut de .env.example / branding.default.json
@@ -422,8 +736,8 @@ fi
 if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   echo
   echo "--- Personnalisation (laisser vide pour garder les valeurs par defaut) ---"
-  read -r -p "Nom complet du projet (ex: Atelier de mon-etablissement) : " INSTALL_PROJECT_NAME_INPUT || true
-  read -r -p "Nom court du projet (ex: L'Atelier) : " INSTALL_SHORT_NAME_INPUT || true
+  timed_read "Nom complet du projet (ex: Atelier de mon-etablissement) : " INSTALL_PROJECT_NAME_INPUT
+  timed_read "Nom court du projet (ex: L'Atelier) : " INSTALL_SHORT_NAME_INPUT
 
   if [[ -n "${INSTALL_PROJECT_NAME_INPUT:-}" || -n "${INSTALL_SHORT_NAME_INPUT:-}" ]]; then
     docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps \
@@ -433,7 +747,7 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   fi
 
   echo
-  read -r -p "Modele Ollama souhaite (nom exact, ex: mistral:latest), ou vide si vous ne savez pas : " INSTALL_MODEL_CHOICE || true
+  timed_read "Modele Ollama souhaite (nom exact, ex: mistral:latest), ou vide si vous ne savez pas : " INSTALL_MODEL_CHOICE
 
   if [[ -n "${INSTALL_MODEL_CHOICE:-}" ]]; then
     update_env "DEFAULT_MODEL" "$INSTALL_MODEL_CHOICE"
@@ -441,16 +755,16 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   else
     echo
     echo "--- Questionnaire materiel (pour suggerer un modele adapte) ---"
-    read -r -p "Nombre de coeurs CPU : " INSTALL_CPU_CORES || true
-    read -r -p "RAM disponible (Go) : " INSTALL_RAM_GB || true
-    read -r -p "GPU dedie disponible ? (o/N) : " INSTALL_HAS_GPU_INPUT || true
+    timed_read "Nombre de coeurs CPU : " INSTALL_CPU_CORES
+    timed_read "RAM disponible (Go) : " INSTALL_RAM_GB
+    timed_read "GPU dedie disponible ? (o/N) : " INSTALL_HAS_GPU_INPUT
     INSTALL_HAS_GPU="0"
     INSTALL_GPU_MODEL=""
     if [[ "${INSTALL_HAS_GPU_INPUT:-}" =~ ^[oOyY] ]]; then
       INSTALL_HAS_GPU="1"
-      read -r -p "Modele du GPU (optionnel) : " INSTALL_GPU_MODEL || true
+      timed_read "Modele du GPU (optionnel) : " INSTALL_GPU_MODEL
     fi
-    read -r -p "Stockage disponible (Go, optionnel) : " INSTALL_DISK_GB || true
+    timed_read "Stockage disponible (Go, optionnel) : " INSTALL_DISK_GB
 
     if [[ -n "${INSTALL_CPU_CORES:-}" && -n "${INSTALL_RAM_GB:-}" ]]; then
       recommendation_json="$(
@@ -477,7 +791,8 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
 fi
 
 echo "Démarrage des services Ollama, ChromaDB et Redis..."
-docker compose -f "$ROOT_DIR/docker-compose.yml" up -d ollama chromadb redis
+retry_on_network_failure "Démarrage d'Ollama/ChromaDB/Redis (récupération des images Docker)" \
+  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d ollama chromadb redis
 
 echo "Attente du démarrage d'Ollama..."
 for attempt in $(seq 1 60); do
@@ -516,11 +831,24 @@ pull_ollama_model() {
 
   if [[ -n "$free_kb" && "$free_kb" -lt "$min_free_kb" ]]; then
     echo "Espace disque insuffisant pour telecharger ${model} (moins de 2 Go libres pour Ollama). Liberez de l'espace disque et relancez ./install.sh." >&2
-    return 1
+    # Code 2 : echec non lie au reseau, inutile de reessayer (voir retry_on_network_failure).
+    return 2
   fi
 
-  local pull_output
-  if pull_output="$(docker exec fablab-ollama ollama pull "$model" 2>&1)"; then
+  # Le telechargement s'affiche en direct (barre de progression d'Ollama) tout en
+  # etant capture dans un fichier temporaire, pour detecter une erreur connue
+  # (espace disque...) sans avoir a la reafficher a la main en cas d'echec.
+  local pull_log pull_status pull_output
+  pull_log="$(mktemp)"
+  if docker exec fablab-ollama ollama pull "$model" 2>&1 | tee "$pull_log"; then
+    pull_status=0
+  else
+    pull_status=$?
+  fi
+  pull_output="$(cat "$pull_log")"
+  rm -f "$pull_log"
+
+  if [[ "$pull_status" -eq 0 ]]; then
     return 0
   fi
 
@@ -535,7 +863,7 @@ pull_ollama_model() {
 
 echo "Telechargement du modele par defaut (${DEFAULT_MODEL})..."
 default_model_pulled=0
-if pull_ollama_model "${DEFAULT_MODEL}"; then
+if retry_on_network_failure "Telechargement du modele ${DEFAULT_MODEL}" pull_ollama_model "${DEFAULT_MODEL}"; then
   default_model_pulled=1
 else
   echo "Passage aux modeles de secours." >&2
@@ -553,7 +881,7 @@ if [[ "$default_model_pulled" -eq 0 ]]; then
     fi
 
     echo "Telechargement du modele de secours (${fallback_model})..."
-    if pull_ollama_model "$fallback_model"; then
+    if retry_on_network_failure "Telechargement du modele ${fallback_model}" pull_ollama_model "$fallback_model"; then
       echo "Utilisation de ${fallback_model} comme modele actif (le modele par defaut n'a pas pu etre telecharge)."
       update_env "DEFAULT_MODEL" "$fallback_model"
       DEFAULT_MODEL="$fallback_model"
@@ -569,23 +897,29 @@ if [[ "$default_model_pulled" -eq 0 ]]; then
 fi
 
 echo "Telechargement du modele d'embedding (${EMBEDDING_MODEL})..."
-if ! pull_ollama_model "${EMBEDDING_MODEL}"; then
+if ! retry_on_network_failure "Telechargement du modele d'embedding ${EMBEDDING_MODEL}" pull_ollama_model "${EMBEDDING_MODEL}"; then
   echo "Impossible de telecharger le modele d'embedding ${EMBEDDING_MODEL}." >&2
   exit 1
 fi
 
 echo "Demarrage complet de la plateforme..."
 if image_exists_locally "$BACKEND_IMAGE_NAME"; then
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d backend
+  retry_on_network_failure "Demarrage du backend" \
+    docker compose -f "$ROOT_DIR/docker-compose.yml" up -d backend
 else
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --build backend
+  retry_on_network_failure "Construction et demarrage du backend" \
+    docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --build backend
 fi
 
-echo "Demarrage optionnel du service de mise a jour..."
-if build_service_or_reuse_local "updater" "$UPDATER_IMAGE_NAME"; then
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d updater >/dev/null 2>&1 || true
-else
-  echo "Le service de mise a jour n'a pas pu demarrer pour le moment. L'application principale reste disponible."
+echo "Demarrage du service de mise a jour..."
+if ! retry_on_network_failure "Construction de l'image du service de mise a jour" \
+  build_service_or_reuse_local "updater" "$UPDATER_IMAGE_NAME"; then
+  echo "Le service de mise a jour n'a pas pu etre construit : il est necessaire au bon fonctionnement du projet." >&2
+  exit 1
+fi
+if ! docker_compose_up_service_required "updater"; then
+  echo "Le service de mise a jour n'a pas pu demarrer : il est necessaire au bon fonctionnement du projet." >&2
+  exit 1
 fi
 
 LOCAL_IP="$(detect_local_ip || true)"
@@ -636,15 +970,16 @@ has_teacher_password="$(
 
 teacher_password_message=""
 if [[ "$has_teacher_password" != "1" ]]; then
-  echo "Generation du mot de passe administrateur initial..."
+  echo "Generation du mot de passe enseignant initial..."
   generated_teacher_password="$(
     docker compose -f "$ROOT_DIR/docker-compose.yml" exec -T backend \
       node scripts/reset-teacher-password.js 2>/dev/null | tail -n 2 | head -n 1 || true
   )"
   if [[ -n "$generated_teacher_password" ]]; then
-    teacher_password_message="Mot de passe administrateur initial : ${generated_teacher_password} (changement impose a la premiere connexion administrateur)"
+    teacher_password_message="Mot de passe enseignant initial : ${generated_teacher_password} (changement impose a la premiere connexion enseignant)"
   fi
 fi
+
 
 cat <<EOF
 
@@ -652,14 +987,14 @@ Initialisation terminee.
 - Application : http://localhost:$SERVER_PORT
 - Application reseau local : ${LOCAL_IP:+http://$LOCAL_IP:$SERVER_PORT}
 - Admin    : http://localhost:$SERVER_PORT/admin
-- Pour obtenir le mot de passe temporaire admin : cd "$ROOT_DIR" && ./password
+- Pour obtenir le mot de passe temporaire admin : cd "$ROOT_DIR" && ./password.sh
 ${teacher_password_message:+- $teacher_password_message}
 ${FIREWALL_NOTE:+
 Attention : $FIREWALL_NOTE}
 
 Scripts utiles :
 - Installer : ./install.sh
-- Mot de passe temporaire admin : ./password
+- Mot de passe temporaire admin : ./password.sh
 - Mettre a jour : ./update.sh
 - Voir la version installee : ./version.sh
 - Redemarrer : ./restart.sh

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchJson, formatDuration } from "../lib/api";
 import { reportError } from "../lib/errors";
 import { consumeSseResponse } from "../lib/streaming";
+import ActionTooltip from "../components/ui/ActionTooltip";
 import InfoPopover from "../components/ui/InfoPopover";
 import { useBranding } from "../hooks/useBranding";
 
@@ -36,44 +37,94 @@ function uniqueSources(sources = []) {
   });
 }
 
-function renderMessageContent(content) {
-  const parts = String(content || "").split(/(\*\*[^*]+\*\*)/g);
+const linkClassName =
+  "text-sky-700 underline decoration-sky-300 underline-offset-4 transition hover:text-sky-800";
+
+function renderLinkNode(key, href, label) {
+  return (
+    <a key={key} href={href} target="_blank" rel="noopener noreferrer" className={linkClassName}>
+      {label}
+    </a>
+  );
+}
+
+function renderBoldAndBareLinks(text, keyPrefix) {
+  const parts = String(text || "").split(/(\*\*[^*]+\*\*)/g);
   const urlPattern = /(https?:\/\/[^\s<]+[^\s<).,;!?])/g;
   const isUrlSegment = (value) => /^https?:\/\/[^\s<]+$/i.test(String(value || ""));
 
-  const renderInlineLinks = (value, keyPrefix) =>
+  const renderInlineLinks = (value, innerKeyPrefix) =>
     String(value || "")
       .split(urlPattern)
       .filter(Boolean)
-      .map((segment, segmentIndex) => {
-        if (isUrlSegment(segment)) {
-          return (
-            <a
-              key={`${keyPrefix}-link-${segmentIndex}`}
-              href={segment}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sky-700 underline decoration-sky-300 underline-offset-4 transition hover:text-sky-800"
-            >
-              {segment}
-            </a>
-          );
-        }
-
-        return <span key={`${keyPrefix}-text-${segmentIndex}`}>{segment}</span>;
-      });
+      .map((segment, segmentIndex) =>
+        isUrlSegment(segment)
+          ? renderLinkNode(`${innerKeyPrefix}-link-${segmentIndex}`, segment, segment)
+          : <span key={`${innerKeyPrefix}-text-${segmentIndex}`}>{segment}</span>
+      );
 
   return parts.map((part, index) => {
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
       return (
-        <strong key={`bold-${index}`} className="font-semibold text-slate-950">
-          {renderInlineLinks(part.slice(2, -2), `bold-${index}`)}
+        <strong key={`${keyPrefix}-bold-${index}`} className="font-semibold text-slate-950">
+          {renderInlineLinks(part.slice(2, -2), `${keyPrefix}-bold-${index}`)}
         </strong>
       );
     }
 
-    return <span key={`text-${index}`}>{renderInlineLinks(part, `text-${index}`)}</span>;
+    return <span key={`${keyPrefix}-text-${index}`}>{renderInlineLinks(part, `${keyPrefix}-text-${index}`)}</span>;
   });
+}
+
+// Les reponses du backend peuvent contenir des liens au format Markdown
+// `[texte](url)` (ex: suggestion de recherche Google). Ils sont extraits ici
+// en <a> avec leur libelle plutot que d'etre affiches tels quels, car
+// l'affichage du chat n'utilise pas de parseur Markdown complet.
+function renderMessageContent(content) {
+  const text = String(content || "");
+  const markdownLinkPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  const segments = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = markdownLinkPattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", value: text.slice(lastIndex, match.index) });
+    }
+    segments.push({ type: "link", label: match[1], href: match[2] });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length || segments.length === 0) {
+    segments.push({ type: "text", value: text.slice(lastIndex) });
+  }
+
+  return segments.map((segment, segmentIndex) =>
+    segment.type === "link"
+      ? renderLinkNode(`mdlink-${segmentIndex}`, segment.href, segment.label)
+      : (
+        <span key={`segment-${segmentIndex}`}>
+          {renderBoldAndBareLinks(segment.value, `segment-${segmentIndex}`)}
+        </span>
+      )
+  );
+}
+
+// Le backend (ensureGeneralAiDisclosure / consigne du prompt systeme, voir ragService.js)
+// fait precéder la reponse d'une phrase d'avertissement quand elle repose sur les
+// connaissances generales du modele plutot que sur un document interne. Elle est
+// detectee ici pour etre affichee separement (petit texte grise hors de la bulle)
+// plutot que comme une phrase normale de la reponse.
+const aiDisclaimerPattern = /^cette réponse est basée sur[^.]*précise[^.]*\.\s*/i;
+
+function splitAiDisclaimer(content) {
+  const text = String(content || "");
+  const match = text.match(aiDisclaimerPattern);
+
+  if (!match) {
+    return { disclaimer: "", rest: text };
+  }
+
+  return { disclaimer: match[0].trim(), rest: text.slice(match[0].length) };
 }
 
 function resolveDownloadUrl(downloadUrl) {
@@ -120,7 +171,10 @@ function isSourceOnlyRequest(value) {
 }
 
 function isRetryableStreamStatus(status) {
-  return [408, 425, 429, 500, 502, 503, 504].includes(Number(status));
+  // 429 est volontairement exclu : c'est la limite de 5 minutes du raisonnement
+  // approfondi (voir requireReasoningRateLimit cote backend), pas un incident
+  // transitoire. La reessayer avec un delai de quelques secondes ne sert a rien.
+  return [408, 425, 500, 502, 503, 504].includes(Number(status));
 }
 
 function isRetryableStreamError(error) {
@@ -163,6 +217,10 @@ async function openChatStreamWithRetry(payload, signal) {
 
       const error = new Error(message);
       error.statusCode = response.status;
+      if (response.status === 429) {
+        const retryAfterHeader = Number(response.headers.get("Retry-After"));
+        error.retryAfterSeconds = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 300;
+      }
       lastError = error;
 
       if (attempt < 2 && isRetryableStreamStatus(response.status)) {
@@ -260,6 +318,9 @@ export default function UserChat() {
   const [copyStatusMessage, setCopyStatusMessage] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [useReasoningModel, setUseReasoningModel] = useState(false);
+  const [reasoningCooldownUntil, setReasoningCooldownUntil] = useState(0);
+  const [cooldownTick, setCooldownTick] = useState(0);
   const [contextSummary, setContextSummary] = useState(null);
   const attachmentInputRef = useRef(null);
   const clientIdRef = useRef(createRuntimeId());
@@ -280,10 +341,38 @@ export default function UserChat() {
       return;
     }
 
+    if (!question) {
+      // Repart de la hauteur CSS par defaut (une ligne) plutot que de faire confiance
+      // a scrollHeight, qui peut renvoyer une valeur trop grande sur un textarea vide
+      // au tout premier rendu (avant que le navigateur ait stabilise la mise en page).
+      textareaRef.current.style.height = "";
+      return;
+    }
+
     textareaRef.current.style.height = "0px";
     const nextHeight = Math.min(textareaRef.current.scrollHeight, 152);
     textareaRef.current.style.height = `${nextHeight}px`;
   }, [question]);
+
+  // Le raisonnement approfondi est limite a une utilisation toutes les 5 minutes cote
+  // serveur (par IP) : ce tick force un nouveau rendu chaque seconde pendant le
+  // cooldown pour que le decompte affiche a l'utilisateur reste a jour.
+  useEffect(() => {
+    if (reasoningCooldownUntil <= Date.now()) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setCooldownTick((value) => value + 1);
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [reasoningCooldownUntil]);
+
+  const reasoningCooldownRemainingMs = Math.max(0, reasoningCooldownUntil - Date.now());
+  const reasoningOnCooldown = reasoningCooldownRemainingMs > 0;
+  const willUseReasoningModel =
+    branding.reasoningModelAvailable && useReasoningModel && !reasoningOnCooldown;
 
   useEffect(() => {
     if (!question.trim()) {
@@ -296,7 +385,8 @@ export default function UserChat() {
       fetchJson("/api/chat/estimate", {
         method: "POST",
         body: JSON.stringify({
-          question
+          question,
+          useReasoningModel: willUseReasoningModel
         })
       })
         .then((payload) => {
@@ -315,10 +405,33 @@ export default function UserChat() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [question]);
+  }, [question, willUseReasoningModel]);
 
-  function confidenceLabel() {
-    return "Estimation";
+  function formatCooldown(remainingMs) {
+    const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function confidenceLabel(confidenceScore) {
+    const score = Number(confidenceScore);
+    if (!Number.isFinite(score)) {
+      return "Estimation";
+    }
+
+    // confidenceScore reflete le volume d'historique reel utilise pour la regression
+    // (voir getLiveChatEstimate cote backend) : peu d'echanges passes pour ce modele
+    // => estimation plus approximative, beaucoup d'historique => plus fiable.
+    if (score >= 0.6) {
+      return "Estimation fiable";
+    }
+
+    if (score >= 0.4) {
+      return "Estimation modérée";
+    }
+
+    return "Estimation approximative";
   }
 
   function renderAssistantStatus(message) {
@@ -497,6 +610,12 @@ export default function UserChat() {
     activeAssistantMessageIdRef.current = assistantMessageId;
     stopRequestedRef.current = false;
 
+    const isReasoningRequest = willUseReasoningModel;
+    // L'utilisateur a coche le raisonnement mais le cooldown de 5 minutes l'empeche
+    // encore : la question part quand meme (avec le modele normal), on le signale
+    // juste sur cette reponse plutot que de bloquer l'envoi.
+    const reasoningDowngraded = branding.reasoningModelAvailable && useReasoningModel && reasoningOnCooldown;
+
     setMessages((current) => [
       ...current,
       userMessage,
@@ -504,6 +623,9 @@ export default function UserChat() {
         id: assistantMessageId,
         role: "assistant",
         content: "",
+        thinking: "",
+        isThinking: false,
+        reasoningDowngraded,
         sources: [],
         grounding: null,
         metrics: null,
@@ -516,7 +638,8 @@ export default function UserChat() {
       clientId: clientIdRef.current,
       sessionId: sessionIdRef.current,
       messages: buildConversationMemory(baseMessages, trimmedQuestion),
-      attachmentIds
+      attachmentIds,
+      useReasoningModel: isReasoningRequest
     };
 
     setQuestion("");
@@ -526,6 +649,13 @@ export default function UserChat() {
       const requestController = new AbortController();
       activeRequestControllerRef.current = requestController;
       const response = await openChatStreamWithRetry(payload, requestController.signal);
+
+      // La requete a franchi le limiteur de raisonnement (5 minutes par IP, cote
+      // serveur) : on demarre localement le meme decompte pour refleter fidelement
+      // l'etat reel plutot que d'attendre un 429 sur la prochaine tentative.
+      if (isReasoningRequest) {
+        setReasoningCooldownUntil(Date.now() + 5 * 60 * 1000);
+      }
 
       await consumeSseResponse(response, {
         queued: (payload) => {
@@ -554,6 +684,20 @@ export default function UserChat() {
         context: (payload) => {
           setContextSummary(payload);
         },
+        thinking: ({ token }) => {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    thinking: `${message.thinking || ""}${token}`,
+                    isThinking: true,
+                    streamState: "generating"
+                  }
+                : message
+            )
+          );
+        },
         token: ({ token }) => {
           setMessages((current) =>
             current.map((message) =>
@@ -561,6 +705,9 @@ export default function UserChat() {
                 ? {
                     ...message,
                     content: `${message.content}${token}`,
+                    // La reponse finale a commence a arriver : la reflexion (si il y en
+                    // avait une) est terminee, elle peut se replier dans le menu deroulant.
+                    isThinking: false,
                     streamState: "generating"
                   }
                 : message
@@ -582,6 +729,7 @@ export default function UserChat() {
                 ? {
                     ...entry,
                     content: entry.content || message,
+                    isThinking: false,
                     streamState: null
                   }
                 : entry
@@ -595,6 +743,7 @@ export default function UserChat() {
                 ? {
                     ...message,
                     content: text || message.content || "",
+                    isThinking: false,
                     grounding,
                     metrics,
                     exchangeId: exchangeId || null,
@@ -612,6 +761,7 @@ export default function UserChat() {
                 ? {
                     ...entry,
                     content: entry.content || message || "Génération interrompue.",
+                    isThinking: false,
                     streamState: null
                   }
                 : entry
@@ -633,6 +783,12 @@ export default function UserChat() {
           )
         );
         return;
+      }
+
+      if (requestError.statusCode === 429 && isReasoningRequest) {
+        // Resynchronise le decompte local sur la vraie duree restante renvoyee par le
+        // serveur (utile si l'etat local avait ete perdu, ex: apres un rechargement).
+        setReasoningCooldownUntil(Date.now() + (requestError.retryAfterSeconds || 300) * 1000);
       }
 
       const friendlyMessage = reportError(
@@ -811,7 +967,10 @@ export default function UserChat() {
         </div>
 
         <div className="chat-stage flex-1 space-y-4 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
-          {messages.map((message, messageIndex) => (
+          {messages.map((message, messageIndex) => {
+            const { disclaimer, rest } = splitAiDisclaimer(message.content);
+
+            return (
             <article
               key={message.id}
               className={`group/message relative z-0 flex ${
@@ -835,16 +994,35 @@ export default function UserChat() {
                 </div>
               )}
 
+              <div className="flex max-w-[88%] flex-col sm:max-w-[78%]">
               <div
-                className={`relative max-w-[88%] px-5 py-4 sm:max-w-[78%] ${
+                className={`relative px-5 py-4 ${
                   message.role === "user"
                     ? "rounded-[28px] rounded-br-[10px] bg-slate-900 text-white shadow-[0_22px_48px_rgba(15,23,42,0.2)] dark:bg-slate-100 dark:text-slate-900"
                     : "rounded-[28px] rounded-bl-[10px] border border-slate-200/80 bg-white/98 text-slate-800 shadow-[0_20px_45px_rgba(148,163,184,0.14)] dark:border-slate-700/80 dark:bg-slate-800/98 dark:text-slate-200"
                 }`}
               >
+                {message.thinking ? (
+                  message.isThinking ? (
+                    <div className="mb-3 rounded-2xl bg-slate-100/80 px-3 py-2.5 text-[13px] leading-6 text-slate-400 dark:bg-slate-900/50 dark:text-slate-500">
+                      <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                        Réflexion en cours…
+                      </p>
+                      <p className="whitespace-pre-wrap italic">{message.thinking}</p>
+                    </div>
+                  ) : (
+                    <details className="mb-3 rounded-2xl bg-slate-100/80 px-3 py-2.5 text-[13px] text-slate-400 dark:bg-slate-900/50 dark:text-slate-500">
+                      <summary className="cursor-pointer select-none text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300">
+                        Voir le raisonnement
+                      </summary>
+                      <p className="mt-2 whitespace-pre-wrap italic leading-6">{message.thinking}</p>
+                    </details>
+                  )
+                ) : null}
+
                 {message.content ? (
                   <p className="whitespace-pre-wrap text-[15px] leading-7">
-                    {renderMessageContent(message.content)}
+                    {renderMessageContent(rest)}
                   </p>
                 ) : (
                   renderAssistantStatus(message)
@@ -876,79 +1054,102 @@ export default function UserChat() {
                 )}
 
                 {message.role === "assistant" && message.content && !message.streamState && (
-                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:border-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-                      aria-label={message.copyState === "copied" ? "Réponse copiée" : "Copier la réponse"}
-                      title={message.copyState === "copied" ? "Copié !" : "Copier la réponse"}
-                      onClick={() => copyMessageContent(message)}
-                    >
-                      {message.copyState === "copied" ? (
-                        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                          <path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                          <rect x="9" y="9" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.8" />
-                          <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                        </svg>
-                      )}
-                    </button>
-
-                    {messageIndex === messages.length - 1 ? (
-                      <button
-                        type="button"
-                        className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-                        disabled={loading}
-                        aria-label="Régénérer la réponse"
-                        title="Régénérer la réponse"
-                        onClick={() => regenerateAnswer(message)}
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                          <path
-                            d="M20 11A8 8 0 1 0 18.5 15.5M20 11V5M20 11h-6"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      </button>
-                    ) : null}
-
-                    {message.exchangeId ? (
-                      <div className="flex items-center gap-1.5" role="group" aria-label="Évaluer cette réponse">
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <div className="inline-flex items-center gap-0.5 rounded-full border border-slate-200 bg-slate-50/80 p-1 dark:border-slate-700 dark:bg-slate-800/60">
+                      <ActionTooltip label={message.copyState === "copied" ? "Copié !" : "Copier"}>
                         <button
                           type="button"
-                          className={`flex h-8 w-8 items-center justify-center rounded-full border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 ${
-                            message.rating === "up"
-                              ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300"
-                              : "border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-700 dark:border-slate-700 dark:text-slate-400 dark:hover:text-emerald-300"
-                          }`}
-                          aria-pressed={message.rating === "up"}
-                          aria-label="Réponse utile"
-                          title="Réponse utile"
-                          onClick={() => rateAnswer(message, "up")}
+                          className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition hover:bg-white hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                          aria-label={message.copyState === "copied" ? "Réponse copiée" : "Copier la réponse"}
+                          onClick={() => copyMessageContent(message)}
                         >
-                          👍
+                          {message.copyState === "copied" ? (
+                            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                              <path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                              <rect x="9" y="9" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.8" />
+                              <path d="M5 15V5a2 2 0 0 1 2-2h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                            </svg>
+                          )}
                         </button>
-                        <button
-                          type="button"
-                          className={`flex h-8 w-8 items-center justify-center rounded-full border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 ${
-                            message.rating === "down"
-                              ? "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-300"
-                              : "border-slate-200 text-slate-500 hover:border-rose-300 hover:text-rose-700 dark:border-slate-700 dark:text-slate-400 dark:hover:text-rose-300"
-                          }`}
-                          aria-pressed={message.rating === "down"}
-                          aria-label="Réponse insatisfaisante"
-                          title="Réponse insatisfaisante"
-                          onClick={() => rateAnswer(message, "down")}
-                        >
-                          👎
-                        </button>
-                      </div>
-                    ) : null}
+                      </ActionTooltip>
+
+                      {messageIndex === messages.length - 1 ? (
+                        <ActionTooltip label="Régénérer">
+                          <button
+                            type="button"
+                            className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition hover:bg-white hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                            disabled={loading}
+                            aria-label="Régénérer la réponse"
+                            onClick={() => regenerateAnswer(message)}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                              <path
+                                d="M20 11A8 8 0 1 0 18.5 15.5M20 11V5M20 11h-6"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </button>
+                        </ActionTooltip>
+                      ) : null}
+
+                      {message.exchangeId ? (
+                        <div className="flex items-center gap-0.5" role="group" aria-label="Évaluer cette réponse">
+                          <span className="mx-1 h-4 w-px bg-slate-200 dark:bg-slate-700" aria-hidden="true" />
+                          <ActionTooltip label="Utile">
+                            <button
+                              type="button"
+                              className={`flex h-8 w-8 items-center justify-center rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 ${
+                                message.rating === "up"
+                                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                  : "text-slate-500 hover:bg-white hover:text-emerald-700 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-emerald-300"
+                              }`}
+                              aria-pressed={message.rating === "up"}
+                              aria-label="Réponse utile"
+                              onClick={() => rateAnswer(message, "up")}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                                <path
+                                  d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3Zm0 0 5.5-6.5a1.5 1.5 0 0 1 2.6.9L14.5 9H19a2 2 0 0 1 1.98 2.29l-1.14 8A2 2 0 0 1 17.86 21H10a3 3 0 0 1-3-3v-8Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </button>
+                          </ActionTooltip>
+                          <ActionTooltip label="Insatisfaisante">
+                            <button
+                              type="button"
+                              className={`flex h-8 w-8 items-center justify-center rounded-full transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 ${
+                                message.rating === "down"
+                                  ? "bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300"
+                                  : "text-slate-500 hover:bg-white hover:text-rose-700 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-rose-300"
+                              }`}
+                              aria-pressed={message.rating === "down"}
+                              aria-label="Réponse insatisfaisante"
+                              onClick={() => rateAnswer(message, "down")}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                                <path
+                                  d="M17 14V3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-3Zm0 0-5.5 6.5a1.5 1.5 0 0 1-2.6-.9L9.5 15H5a2 2 0 0 1-1.98-2.29l1.14-8A2 2 0 0 1 6.14 3H14a3 3 0 0 1 3 3v8Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.6"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </button>
+                          </ActionTooltip>
+                        </div>
+                      ) : null}
+                    </div>
 
                     {message.ratingMessage ? (
                       <span role="status" className="text-[12px] text-slate-500 dark:text-slate-400">
@@ -979,8 +1180,20 @@ export default function UserChat() {
                   )}
 
               </div>
+
+              {message.reasoningDowngraded ? (
+                <p className="mt-1.5 px-2 text-[11px] text-slate-400 dark:text-slate-500">
+                  Raisonnement approfondi indisponible (limité à une question toutes les 5 minutes) : réponse
+                  standard générée à la place.
+                </p>
+              ) : null}
+              {disclaimer ? (
+                <p className="mt-1.5 px-2 text-[11px] text-slate-400 dark:text-slate-500">{disclaimer}</p>
+              ) : null}
+              </div>
             </article>
-          ))}
+            );
+          })}
 
           {error && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-soft dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200">
@@ -1051,40 +1264,78 @@ export default function UserChat() {
 
           <div className="rounded-[30px] border border-slate-200/80 bg-white/96 p-2 shadow-[0_18px_40px_rgba(148,163,184,0.14)] dark:border-slate-700/80 dark:bg-slate-800/96">
             <div className="flex items-end gap-2">
-              <input
-                ref={attachmentInputRef}
-                type="file"
-                accept={attachmentAcceptedExtensions}
-                className="hidden"
-                onChange={handleAttachmentSelect}
-                aria-hidden="true"
-                tabIndex={-1}
-              />
-              <button
-                type="button"
-                className="mb-1.5 ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:opacity-40 dark:hover:bg-slate-700 dark:hover:text-slate-200"
-                aria-label={attachmentHelpLabel}
-                title={attachmentHelpLabel}
-                disabled={attachmentUploading || loading || attachments.length >= attachmentMaxCount}
-                onClick={() => attachmentInputRef.current?.click()}
-              >
-                {attachmentUploading ? (
-                  <span
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600"
-                    aria-hidden="true"
-                  />
-                ) : (
+              {branding.reasoningModelAvailable ? (
+                <button
+                  type="button"
+                  className={`mb-1.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 ${
+                    useReasoningModel && reasoningOnCooldown
+                      ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                      : useReasoningModel
+                        ? "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-300"
+                        : "border-transparent text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-200"
+                  }`}
+                  aria-pressed={useReasoningModel}
+                  aria-label={
+                    useReasoningModel
+                      ? "Désactiver le raisonnement approfondi"
+                      : "Activer le raisonnement approfondi"
+                  }
+                  title={
+                    reasoningOnCooldown
+                      ? `Raisonnement approfondi : disponible dans ${formatCooldown(reasoningCooldownRemainingMs)} (limité à une question toutes les 5 minutes)`
+                      : "Raisonnement approfondi : réponses plus lentes et plus posées, limité à une question toutes les 5 minutes"
+                  }
+                  onClick={() => setUseReasoningModel((value) => !value)}
+                >
                   <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true">
                     <path
-                      d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
+                      d="M9 18h6M10 21h4M12 3a6 6 0 0 0-6 6c0 2.4 1.2 3.9 2.2 4.9.6.6 1 1.4 1 2.1h5.6c0-.7.4-1.5 1-2.1C16.8 12.9 18 11.4 18 9a6 6 0 0 0-6-6Z"
                       stroke="currentColor"
                       strokeWidth="1.6"
                       strokeLinecap="round"
                       strokeLinejoin="round"
                     />
                   </svg>
-                )}
-              </button>
+                </button>
+              ) : null}
+              {branding.attachmentsEnabled !== false ? (
+                <>
+                  <input
+                    ref={attachmentInputRef}
+                    type="file"
+                    accept={attachmentAcceptedExtensions}
+                    className="hidden"
+                    onChange={handleAttachmentSelect}
+                    aria-hidden="true"
+                    tabIndex={-1}
+                  />
+                  <button
+                    type="button"
+                    className="mb-1.5 ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 disabled:opacity-40 dark:hover:bg-slate-700 dark:hover:text-slate-200"
+                    aria-label={attachmentHelpLabel}
+                    title={attachmentHelpLabel}
+                    disabled={attachmentUploading || loading || attachments.length >= attachmentMaxCount}
+                    onClick={() => attachmentInputRef.current?.click()}
+                  >
+                    {attachmentUploading ? (
+                      <span
+                        className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true">
+                        <path
+                          d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    )}
+                  </button>
+                </>
+              ) : null}
               <textarea
                 ref={textareaRef}
                 className="message-input min-h-[54px] flex-1 resize-none"
@@ -1124,6 +1375,14 @@ export default function UserChat() {
             </div>
           </div>
 
+          {branding.reasoningModelAvailable && (useReasoningModel || reasoningOnCooldown) ? (
+            <p className="mt-3 px-1 text-[12px] text-slate-500 dark:text-slate-400">
+              {reasoningOnCooldown
+                ? `Raisonnement approfondi disponible dans ${formatCooldown(reasoningCooldownRemainingMs)} (une question toutes les 5 minutes).`
+                : "Raisonnement approfondi activé : réponses plus lentes et plus posées."}
+            </p>
+          ) : null}
+
           {liveEstimate && (
             <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[12px] text-slate-500">
               <span>{confidenceLabel(liveEstimate.confidenceScore)}</span>
@@ -1136,18 +1395,24 @@ export default function UserChat() {
         </form>
       </section>
 
-      {contextSummary && contextSummary.limit > 0 ? (
+      {contextSummary && contextSummary.modelContextWindow > 0 ? (
         <div className="mx-auto flex w-full max-w-xs flex-col items-center gap-1.5" aria-live="polite">
           <div className="h-1 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
             <div
               className="h-1 rounded-full bg-slate-400 transition-all duration-300 dark:bg-slate-500"
               style={{
-                width: `${Math.min(100, Math.round((contextSummary.usedMessages / contextSummary.limit) * 100))}%`
+                width: `${Math.min(
+                  100,
+                  Math.round(
+                    (Math.round(contextSummary.characters / 4) / contextSummary.modelContextWindow) * 100
+                  )
+                )}%`
               }}
             />
           </div>
           <p className="text-[11px] text-slate-400 dark:text-slate-500">
-            Mémoire de conversation : {contextSummary.usedMessages}/{contextSummary.limit} échanges pris en compte
+            Contexte du modèle : ~{Math.round(contextSummary.characters / 4).toLocaleString("fr-FR")} /{" "}
+            {contextSummary.modelContextWindow.toLocaleString("fr-FR")} tokens utilisés
           </p>
         </div>
       ) : null}

@@ -6,8 +6,8 @@ import EmptyState from "../../components/ui/EmptyState";
 import StatusBadge from "../../components/ui/StatusBadge";
 
 const roleLabels = {
-  owner: "Propriétaire",
-  teacher: "Administrateur"
+  owner: "Administration",
+  teacher: "Enseignant"
 };
 
 function generatePassword() {
@@ -26,6 +26,7 @@ export default function AdminUsersManager() {
 
   const [identifiant, setIdentifiant] = useState("");
   const [password, setPassword] = useState("");
+  const [role, setRole] = useState("teacher");
   const [creating, setCreating] = useState(false);
 
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
@@ -66,11 +67,12 @@ export default function AdminUsersManager() {
     try {
       await fetchJson("/api/admin/admin-users", {
         method: "POST",
-        body: JSON.stringify({ identifiant, password })
+        body: JSON.stringify({ identifiant, password, role })
       });
       setSuccess(`Compte "${identifiant}" créé.`);
       setIdentifiant("");
       setPassword("");
+      setRole("teacher");
       await loadUsers();
     } catch (requestError) {
       setError(reportError("admin-users-create", requestError));
@@ -95,6 +97,26 @@ export default function AdminUsersManager() {
       await loadUsers();
     } catch (requestError) {
       setError(reportError("admin-users-delete", requestError));
+    }
+  }
+
+  async function handleRoleChange(user, nextRole) {
+    if (nextRole === user.role) {
+      return;
+    }
+
+    setError("");
+    setSuccess("");
+
+    try {
+      await fetchJson(`/api/admin/admin-users/${user.id}/role`, {
+        method: "PUT",
+        body: JSON.stringify({ role: nextRole })
+      });
+      setSuccess(`Rôle de "${user.identifier}" mis à jour.`);
+      await loadUsers();
+    } catch (requestError) {
+      setError(reportError("admin-users-role", requestError));
     }
   }
 
@@ -125,15 +147,14 @@ export default function AdminUsersManager() {
     <div className="space-y-6">
       <section className="panel px-6 py-6 sm:px-8">
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500 dark:text-slate-400">
-          Réservé au propriétaire
+          Administration
         </p>
         <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
           Comptes admin
         </h2>
         <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-          Créez des accès administrateur nommés (identifiant + mot de passe propres à chaque
-          personne). Ces comptes ne peuvent jamais devenir propriétaire — il n'y en a qu'un seul,
-          défini une fois pour toutes à l'installation.
+          Créez des comptes administrateur nommés, avec un identifiant et un mot de passe propres
+          à chaque personne.
         </p>
       </section>
 
@@ -143,7 +164,7 @@ export default function AdminUsersManager() {
       <section className="subpanel p-6">
         <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Nouveau compte</h3>
         <form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={handleCreate}>
-          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 sm:col-span-2">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
             Identifiant
             <input
               type="text"
@@ -156,8 +177,16 @@ export default function AdminUsersManager() {
             />
           </label>
 
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+            Rôle
+            <select className="input mt-2" value={role} onChange={(event) => setRole(event.target.value)}>
+              <option value="teacher">Enseignant</option>
+              <option value="owner">Administration</option>
+            </select>
+          </label>
+
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 sm:col-span-2">
-            Mot de passe (au moins 8 caractères)
+            Mot de passe (au moins 12 caractères)
             <div className="mt-2 flex gap-2">
               <input
                 type="text"
@@ -167,7 +196,7 @@ export default function AdminUsersManager() {
                 placeholder="Mot de passe"
                 autoComplete="new-password"
                 required
-                minLength={8}
+                minLength={12}
               />
               <button
                 type="button"
@@ -233,6 +262,14 @@ export default function AdminUsersManager() {
                 </div>
 
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <select
+                    className="input px-2 py-1.5 text-xs"
+                    value={user.role}
+                    onChange={(event) => handleRoleChange(user, event.target.value)}
+                  >
+                    <option value="teacher">Enseignant</option>
+                    <option value="owner">Administration</option>
+                  </select>
                   <button
                     className="ghost-button px-3 py-1.5 text-xs"
                     type="button"

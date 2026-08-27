@@ -14,7 +14,7 @@ Depuis le dossier du projet :
 
 ```bash
 cd chemin/vers/fablab-ai
-chmod +x install.sh update.sh restart.sh stop.sh
+chmod +x install.sh doctor.sh update.sh restart.sh stop.sh
 ./install.sh
 ```
 
@@ -23,8 +23,8 @@ chmod +x install.sh update.sh restart.sh stop.sh
 1. crée `.env` à partir de `.env.example` si absent,
 2. vérifie que Docker est installé et que le daemon tourne (sinon affiche comment l'installer/le
    démarrer selon l'OS détecté),
-3. génère `CONFIG_ENCRYPTION_KEY` si elle n'est pas déjà définie,
-4. construit les images et démarre tous les services,
+3. génère les secrets de sécurité nécessaires lorsqu'ils sont absents,
+4. protège `.env` avec des permissions `600`, construit les images et démarre tous les services,
 5. attend qu'Ollama soit prêt, télécharge le modèle par défaut (`DEFAULT_MODEL`) et le modèle
    d'embedding (`EMBEDDING_MODEL`),
 6. affiche l'URL de l'application et le mot de passe d'accès initial.
@@ -35,17 +35,18 @@ En environnement non interactif (CI, serveur sans terminal attaché), utilisez :
 ./install.sh --non-interactive
 ```
 
-Toutes les questions sont alors sautées et les valeurs par défaut (`.env.example` +
-`backend/config/branding.default.json`) sont utilisées.
+Toutes les questions sont alors sautées. Les valeurs fonctionnelles par défaut sont utilisées et
+les secrets manquants sont générés localement et enregistrés uniquement dans le fichier `.env`
+protégé. Ne placez jamais de secret dans le dépôt ou dans une archive.
 
 ## Après l'installation
 
 - Application : `http://localhost:3000` (ou l'IP de la machine sur le réseau local, voir plus
   bas).
 - Administration : `http://localhost:3000/admin`.
-- Mot de passe d'accès temporaire : `./password`.
-- Mot de passe administrateur généré automatiquement : affiché une seule fois à la fin de
-  l'installation. Le changement est imposé à la première connexion administrateur.
+- Mot de passe d'accès temporaire rotatif : `./password.sh`.
+- Mot de passe enseignant généré automatiquement : affiché une seule fois à la fin de
+  l'installation. Le changement est imposé à la première connexion enseignant.
 
 ## Personnalisation
 
@@ -72,9 +73,13 @@ local uniquement : `ADMIN_ACCESS_MODE=local` dans `.env`.
 ## Ports exposés
 
 Seul le port applicatif (`PORT`, `3000` par défaut) est publié sur l'hôte. Ollama, ChromaDB et
-Redis ne communiquent qu'via le réseau Docker interne — ne les exposez pas publiquement.
+Redis ne communiquent que via le réseau Docker interne — ne les exposez pas publiquement.
 
 ## Problèmes courants
+
+Commencez toujours par `./doctor.sh --check-only` pour un diagnostic sans modification, ou
+`./doctor.sh` pour proposer les réparations sûres. Le mode `./doctor.sh --yes` est réservé aux
+interventions non interactives car il accepte les corrections proposées.
 
 | Symptôme | Cause probable | Solution |
 |---|---|---|

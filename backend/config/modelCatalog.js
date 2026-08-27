@@ -174,7 +174,7 @@ const categoryRoleHints = {
 // Detection du fournisseur a partir du nom du modele, pour afficher un
 // marqueur (ex. drapeau francais pour Mistral) sans dupliquer l'info.
 const providerNamePatterns = [
-  ["mistral", /^mistral/i],
+  ["mistral", /^(mistral|mixtral|codestral|ministral|devstral|pixtral|magistral)/i],
   ["meta", /^llama/i],
   ["google", /^gemma/i],
   ["microsoft", /^phi/i],
@@ -183,7 +183,7 @@ const providerNamePatterns = [
   ["lg", /^exaone/i]
 ];
 
-function detectProvider(modelName) {
+export function detectProvider(modelName) {
   const match = providerNamePatterns.find(([, pattern]) => pattern.test(modelName));
   return match ? match[0] : "other";
 }
@@ -218,7 +218,7 @@ function isValidCatalogShape(candidate) {
 export const staticModelCatalog = enrichCatalog(rawModelCatalog);
 
 /**
- * Catalogue effectif : lit le cache d'actualisation mensuelle s'il existe et est
+ * Catalogue effectif : lit le cache d'actualisation hebdomadaire s'il existe et est
  * valide (voir modelCatalogRefreshService.js), sinon retombe sur le catalogue
  * statique. Relu a chaque appel (fichier local, cout negligeable) pour que
  * l'admin voie un rafraichissement sans redemarrer le backend.

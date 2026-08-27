@@ -121,6 +121,13 @@ async function getOrderedJobs() {
   };
 }
 
+// Nombre de demandes actives + en attente : utilise pour affiner l'estimation de delai
+// de reponse (l'attente en file grandit avec ce nombre, cf buildTimingModel).
+export async function getCurrentQueueDepth() {
+  const { allJobs } = await getOrderedJobs();
+  return allJobs.length;
+}
+
 export async function getQueueStatus(clientId) {
   return {
     position: null,
@@ -300,6 +307,9 @@ async function processChatJob(job) {
       {
         onToken: (token) => {
           writeSseEvent(stream.res, "token", { token });
+        },
+        onThinkingToken: (token) => {
+          writeSseEvent(stream.res, "thinking", { token });
         }
       }
     );
@@ -388,6 +398,7 @@ export async function processDirectChatRequest({
   folderName,
   history = [],
   attachmentIds = [],
+  useReasoningModel = false,
   persistExchange = null
 }) {
   const stream = chatStreams.get(String(clientId));
@@ -396,7 +407,10 @@ export async function processDirectChatRequest({
   }
 
   const startTime = Date.now();
-  const modelName = ollamaService.getActiveModel();
+  // Bascule sur le modele de raisonnement seulement s'il est reellement configure :
+  // sinon on reste sur le modele par defaut plutot que d'echouer silencieusement.
+  const reasoningModelName = useReasoningModel ? ollamaService.getActiveModelByRole("reasoning") : "";
+  const modelName = reasoningModelName || ollamaService.getActiveModel();
   writeSseEvent(stream.res, "start", {
     message: "Generation de la reponse en cours..."
   });
@@ -502,6 +516,9 @@ export async function processDirectChatRequest({
       {
         onToken: (token) => {
           writeSseEvent(stream.res, "token", { token });
+        },
+        onThinkingToken: (token) => {
+          writeSseEvent(stream.res, "thinking", { token });
         }
       }
     );
@@ -585,9 +602,11 @@ export async function generateChatResponse({
   question,
   folderName = "all",
   history = [],
-  attachmentIds = []
+  attachmentIds = [],
+  useReasoningModel = false
 }) {
-  const modelName = ollamaService.getActiveModel();
+  const reasoningModelName = useReasoningModel ? ollamaService.getActiveModelByRole("reasoning") : "";
+  const modelName = reasoningModelName || ollamaService.getActiveModel();
   const startTime = Date.now();
   const { messages, promptPreview, sources, responseOverride, grounding, retrieval } = await ragService.buildRagPayload(
     question,

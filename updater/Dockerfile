@@ -6,7 +6,7 @@ ARG TARGETARCH
 ARG DOCKER_COMPOSE_VERSION=2.35.1
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends docker.io ca-certificates curl tar gzip \
+  && apt-get install -y --no-install-recommends docker.io ca-certificates curl tar gzip zip \
   && case "$TARGETARCH" in \
        arm64) compose_arch="aarch64" ;; \
        amd64) compose_arch="x86_64" ;; \
@@ -18,7 +18,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev
 
 COPY . .
 

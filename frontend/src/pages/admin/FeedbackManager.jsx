@@ -393,16 +393,34 @@ export default function FeedbackManager() {
                 Avis des utilisateurs
               </h3>
               <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                Les évaluations 👍 / 👎 données dans le chat guident automatiquement les prochaines
+                Les évaluations données dans le chat guident automatiquement les prochaines
                 réponses de l&apos;assistant sur des questions similaires.
               </p>
             </div>
             <div className="flex items-center gap-3 text-sm">
               <StatusBadge tone="success">
-                👍 {ratingsOverview.stats?.upCount || 0}
+                <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                  <path
+                    d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h3Zm0 0 5.5-6.5a1.5 1.5 0 0 1 2.6.9L14.5 9H19a2 2 0 0 1 1.98 2.29l-1.14 8A2 2 0 0 1 17.86 21H10a3 3 0 0 1-3-3v-8Z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {ratingsOverview.stats?.upCount || 0}
               </StatusBadge>
               <StatusBadge tone={ratingsOverview.stats?.downCount > 0 ? "danger" : "neutral"}>
-                👎 {ratingsOverview.stats?.downCount || 0}
+                <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                  <path
+                    d="M17 14V3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-3Zm0 0-5.5 6.5a1.5 1.5 0 0 1-2.6-.9L9.5 15H5a2 2 0 0 1-1.98-2.29l1.14-8A2 2 0 0 1 6.14 3H14a3 3 0 0 1 3 3v8Z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {ratingsOverview.stats?.downCount || 0}
               </StatusBadge>
             </div>
           </div>

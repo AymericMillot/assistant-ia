@@ -4,11 +4,18 @@ import { getSetting, setSetting } from "../config/db.js";
 const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
 const defaultThreadCount = Math.max(1, os.availableParallelism?.() || os.cpus().length || 4);
 
+// La taille de contexte reelle d'un modele ne change qu'en cas de changement de modele/Modelfile :
+// un cache court evite d'appeler /api/show a chaque message tout en restant a jour rapidement
+// (6h en cas de succes, 1min en cas d'echec pour reessayer vite sans marteler Ollama).
+const modelContextLengthCacheTtlMs = 6 * 60 * 60 * 1000;
+const modelContextLengthFailureCacheTtlMs = 60 * 1000;
+const modelContextLengthCache = new Map();
+
 // Le modele d'embedding est masque dans l'admin : la liste est recalculee a chaque appel
 // pour suivre un eventuel changement de modele d'embedding sans redemarrage.
 function getHiddenModelNames() {
   return new Set([
-    getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text")
+    getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest")
   ]);
 }
 
@@ -61,21 +68,64 @@ function getKeepAliveValue() {
   return keepAlive;
 }
 
-function buildOllamaOptions(temperature) {
+// Interroge Ollama (/api/show) pour la taille de contexte reelle et maximale d'un modele.
+// La cle exacte varie selon l'architecture ("llama.context_length", "gemma2.context_length",
+// "qwen2.context_length", ...) : on la cherche dynamiquement dans model_info plutot que de
+// supposer un nom fixe ou une valeur generique.
+export async function getModelContextLength(modelName) {
+  const normalizedName = String(modelName || "").trim();
+  if (!normalizedName) {
+    return null;
+  }
+
+  const cached = modelContextLengthCache.get(normalizedName);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  try {
+    const response = await ollamaRequest("/api/show", { model: normalizedName, name: normalizedName });
+    const payload = await response.json();
+    const modelInfo = payload?.model_info || {};
+    const contextLengthKey = Object.keys(modelInfo).find((key) => key.endsWith(".context_length"));
+    const contextLength = contextLengthKey ? Number(modelInfo[contextLengthKey]) : NaN;
+    const value = Number.isFinite(contextLength) && contextLength > 0 ? contextLength : null;
+
+    modelContextLengthCache.set(normalizedName, {
+      value,
+      expiresAt: Date.now() + modelContextLengthCacheTtlMs
+    });
+    return value;
+  } catch {
+    modelContextLengthCache.set(normalizedName, {
+      value: null,
+      expiresAt: Date.now() + modelContextLengthFailureCacheTtlMs
+    });
+    return null;
+  }
+}
+
+async function buildOllamaOptions(temperature, modelName) {
   const options = {
     num_thread: parseOptionalNumber(process.env.OLLAMA_NUM_THREAD) || defaultThreadCount,
     temperature
   };
 
   const configuredGpuCount = parseOptionalNumber(process.env.OLLAMA_NUM_GPU);
-  const configuredContextSize = parseOptionalNumber(process.env.OLLAMA_NUM_CTX);
-
   if (configuredGpuCount !== null) {
     options.num_gpu = configuredGpuCount;
   }
 
-  if (configuredContextSize !== null) {
-    options.num_ctx = configuredContextSize;
+  // OLLAMA_NUM_CTX reste un plafond explicite choisi par l'admin (ex: contrainte memoire) s'il
+  // est defini. Sinon, on utilise la taille de contexte reelle et maximale du modele (via
+  // /api/show) plutot que de laisser Ollama appliquer son defaut generique, souvent bien
+  // inferieur au maximum que le modele supporte réellement.
+  const configuredContextSize = parseOptionalNumber(process.env.OLLAMA_NUM_CTX);
+  const contextSize =
+    configuredContextSize !== null ? configuredContextSize : await getModelContextLength(modelName);
+
+  if (contextSize !== null && contextSize !== undefined) {
+    options.num_ctx = contextSize;
   }
 
   return options;
@@ -323,7 +373,7 @@ export async function streamGeneratedAnswer(
         context,
         stream: true,
         keep_alive: getKeepAliveValue(),
-        options: buildOllamaOptions(0.2)
+        options: await buildOllamaOptions(0.2, resolvedModel)
       },
       { signal }
     );
@@ -385,7 +435,7 @@ function normalizeChatMessages(messages) {
 
 export async function streamChatAnswer(
   { model = getActiveModel(), messages, signal },
-  { onToken } = {}
+  { onToken, onThinkingToken } = {}
 ) {
   return executeWithModelFallback(model, async (resolvedModel) => {
     const response = await ollamaRequest(
@@ -395,7 +445,7 @@ export async function streamChatAnswer(
         messages: normalizeChatMessages(messages),
         stream: true,
         keep_alive: getKeepAliveValue(),
-        options: buildOllamaOptions(Number(process.env.OLLAMA_TEMPERATURE || 0.3))
+        options: await buildOllamaOptions(Number(process.env.OLLAMA_TEMPERATURE || 0.3), resolvedModel)
       },
       { signal }
     );
@@ -405,6 +455,7 @@ export async function streamChatAnswer(
     let buffer = "";
     let finalPayload = null;
     let fullText = "";
+    let fullThinking = "";
 
     while (true) {
       const { done, value } = await reader.read();
@@ -427,8 +478,19 @@ export async function streamChatAnswer(
         }
 
         finalPayload = payload;
-        const token = payload?.message?.content || "";
 
+        // Les modeles "raisonneurs" (ex: deepseek-r1) renvoient leur reflexion dans
+        // message.thinking, distinct de message.content (la reponse finale) : Ollama
+        // les separe deja nativement, pas besoin de parser des balises <think> ici.
+        const thinkingToken = payload?.message?.thinking || "";
+        if (thinkingToken) {
+          fullThinking += thinkingToken;
+          if (onThinkingToken) {
+            onThinkingToken(thinkingToken);
+          }
+        }
+
+        const token = payload?.message?.content || "";
         if (token) {
           fullText += token;
           if (onToken) {
@@ -440,6 +502,7 @@ export async function streamChatAnswer(
 
     return {
       text: fullText,
+      thinking: fullThinking,
       payload: finalPayload
     };
   });
@@ -454,7 +517,7 @@ export async function generateChatAnswer({ model = getActiveModel(), messages, s
         messages: normalizeChatMessages(messages),
         stream: false,
         keep_alive: getKeepAliveValue(),
-        options: buildOllamaOptions(Number(process.env.OLLAMA_TEMPERATURE || 0.3))
+        options: await buildOllamaOptions(Number(process.env.OLLAMA_TEMPERATURE || 0.3), resolvedModel)
       },
       { signal }
     );

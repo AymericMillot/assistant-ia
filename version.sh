@@ -34,7 +34,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if ! docker_compose ps --status running --services 2>/dev/null | grep -qx "updater"; then
-  echo "(Service de mise a jour non demarre : impossible de verifier une version plus recente. Lancez ./restart.sh puis reessayez.)"
+  echo "(Service de mise a jour non demarre : impossible de verifier une version plus recente. Lancez ./updater.sh puis reessayez.)"
   exit 0
 fi
 

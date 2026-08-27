@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import ModelSelector from "../../components/ModelSelector";
+import FrenchFlagBadge from "../../components/ui/FrenchFlagBadge";
 import { fetchJson, formatDateTime } from "../../lib/api";
 import { reportError } from "../../lib/errors";
 import { consumeNdjsonResponse } from "../../lib/streaming";
@@ -15,6 +16,7 @@ export default function ModelManager({ onRefreshSummary }) {
   const [catalog, setCatalog] = useState([]);
   const [catalogUpdatedAt, setCatalogUpdatedAt] = useState(null);
   const [catalogRefreshBusy, setCatalogRefreshBusy] = useState(false);
+  const [suggestionsCollapsed, setSuggestionsCollapsed] = useState(true);
   const [activeModel, setActiveModel] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [activeImageModel, setActiveImageModel] = useState("");
@@ -40,7 +42,6 @@ export default function ModelManager({ onRefreshSummary }) {
     diskGb: "",
     notes: ""
   });
-  const [catalogExpanded, setCatalogExpanded] = useState(false);
   const [recommendation, setRecommendation] = useState(null);
   const [recommendationBusy, setRecommendationBusy] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
@@ -421,61 +422,85 @@ export default function ModelManager({ onRefreshSummary }) {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-                  Suggestions de modèles
-                </h3>
+                <button
+                  type="button"
+                  className="flex items-center gap-2 text-left"
+                  aria-expanded={!suggestionsCollapsed}
+                  onClick={() => setSuggestionsCollapsed((value) => !value)}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${
+                      suggestionsCollapsed ? "" : "rotate-90"
+                    }`}
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M9 6l6 6-6 6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                    Suggestions de modèles
+                  </h3>
+                </button>
                 <InfoPopover label="À propos du catalogue">
-                  Ce catalogue est actualisé automatiquement une fois par mois depuis
+                  Ce catalogue est actualisé automatiquement une fois par semaine depuis
                   ollama.com/library (ou une source distante personnalisée si configurée par
                   l&apos;administrateur du serveur). En cas d&apos;échec, la dernière version connue
                   (ou le catalogue intégré à l&apos;application) reste utilisée.
                 </InfoPopover>
               </div>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Une sélection triée selon le besoin : vitesse, usage classique, raisonnement ou
-                multimodal. L&apos;état « installé » est vérifié en direct auprès d&apos;Ollama.
-              </p>
-              <p className="mt-1 text-xs text-slate-400">
-                {catalogUpdatedAt
-                  ? `Dernière actualisation : ${formatDateTime(catalogUpdatedAt)}`
-                  : "Catalogue intégré (jamais actualisé depuis une source distante)."}
-              </p>
+              {suggestionsCollapsed ? (
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  {catalog.length} catégorie{catalog.length > 1 ? "s" : ""} ·{" "}
+                  {catalog.reduce((total, family) => total + family.models.length, 0)} modèles
+                  suggérés — repliées pour gagner de la place.
+                </p>
+              ) : (
+                <>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                    Une sélection triée selon le besoin : vitesse, usage classique, raisonnement ou
+                    multimodal. L&apos;état « installé » est vérifié en direct auprès d&apos;Ollama.
+                  </p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {catalogUpdatedAt
+                      ? `Dernière actualisation : ${formatDateTime(catalogUpdatedAt)}`
+                      : "Catalogue intégré (jamais actualisé depuis une source distante)."}
+                  </p>
+                </>
+              )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                className="soft-button"
-                onClick={() => setCatalogExpanded((current) => !current)}
-                type="button"
-              >
-                {catalogExpanded ? "Masquer" : "Afficher les suggestions"}
-              </button>
-              {catalogExpanded ? (
-                <>
+            {!suggestionsCollapsed && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="ghost-button"
+                  disabled={catalogRefreshBusy}
+                  onClick={refreshCatalog}
+                  type="button"
+                >
+                  {catalogRefreshBusy ? "Actualisation..." : "Actualiser le catalogue"}
+                </button>
+                {installViews.map((view) => (
                   <button
-                    className="ghost-button"
-                    disabled={catalogRefreshBusy}
-                    onClick={refreshCatalog}
-                    type="button"
+                    key={view.id}
+                    className={activeView === view.id ? "soft-button" : "ghost-button"}
+                    disabled={busy}
+                    onClick={() => setActiveView(view.id)}
                   >
-                    {catalogRefreshBusy ? "Actualisation..." : "Actualiser le catalogue"}
+                    {view.label}
                   </button>
-                  {installViews.map((view) => (
-                    <button
-                      key={view.id}
-                      className={activeView === view.id ? "soft-button" : "ghost-button"}
-                      disabled={busy}
-                      onClick={() => setActiveView(view.id)}
-                    >
-                      {view.label}
-                    </button>
-                  ))}
-                </>
-              ) : null}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {catalogExpanded ? (
+          {!suggestionsCollapsed && (
           <div className="mt-6 space-y-6">
             {displayedFamilies.map((family) => (
               <div
@@ -507,8 +532,9 @@ export default function ModelManager({ onRefreshSummary }) {
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <h5 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                            <h5 className="flex items-center gap-2 text-base font-semibold text-slate-900 dark:text-slate-100">
                               {model.label}
+                              {model.provider === "mistral" && <FrenchFlagBadge />}
                             </h5>
                             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
                               {model.name}
@@ -542,7 +568,7 @@ export default function ModelManager({ onRefreshSummary }) {
               </div>
             ))}
           </div>
-          ) : null}
+          )}
         </section>
       ) : null}
 
@@ -633,11 +659,17 @@ export default function ModelManager({ onRefreshSummary }) {
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <h4 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  <h4 className="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-slate-100">
                     {model.name}
+                    {model.provider === "mistral" && <FrenchFlagBadge />}
                   </h4>
                   <p className="mt-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
                     Mis à jour {formatDateTime(model.modifiedAt)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    {model.contextLength
+                      ? `Contexte : ${model.contextLength.toLocaleString("fr-FR")} tokens`
+                      : "Contexte : indisponible (Ollama injoignable ou modèle non interrogeable)"}
                   </p>
                 </div>
                 {model.name === activeModel && (

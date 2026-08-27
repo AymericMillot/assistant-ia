@@ -17,10 +17,12 @@ Voir `.env.example` pour la liste complète et à jour, commentée par section. 
 
 - **Secrets** (`JWT_SECRET`, `APP_PASSWORD_SEED`, `CONFIG_ENCRYPTION_KEY`) : générer des valeurs
   uniques et privées, ne jamais réutiliser les exemples.
+- **Secrets locaux** : générés localement à l'installation, hachés avec bcrypt en base
+  lorsqu'ils servent à l'authentification et jamais inclus dans un export.
 - **Services** (`OLLAMA_URL`, `CHROMA_URL`, `REDIS_URL`) : par défaut pointent vers les noms de
   service Docker Compose (`ollama`, `chromadb`, `redis`) — à ajuster seulement en dehors de Docker.
 - **`MODEL_CATALOG_SOURCE_URL`** : URL optionnelle d'un catalogue JSON distant (même forme que
-  `backend/config/modelCatalog.js`) pour l'actualisation mensuelle automatique. Vide par défaut :
+  `backend/config/modelCatalog.js`) pour l'actualisation hebdomadaire automatique. Vide par défaut :
   le catalogue statique embarqué fait foi.
 - **`DEPLOY_FTP_*`** : identifiants de secours pour la publication de mises à jour ; préférer les
   configurer depuis l'admin (page "Export et déploiement"), où ils sont chiffrés en base.
@@ -60,6 +62,11 @@ routage automatique d'une question vers le modèle le plus adapté n'est pas imp
 `CONFIG_ENCRYPTION_KEY` chiffre (AES-256-GCM) les valeurs sensibles stockées en base (identifiants
 FTP de déploiement). Sans cette variable, ces champs ne peuvent pas être enregistrés depuis
 l'admin — les variables `DEPLOY_FTP_*` de `.env` restent alors le seul moyen de les configurer.
+
+Le backend refuse désormais de démarrer avec un secret principal absent, prévisible ou inférieur à
+32 caractères. `install.sh` les génère automatiquement et `doctor.sh` sait détecter/réparer les
+configurations anciennes. Sauvegardez `.env` de manière sécurisée : changer
+`CONFIG_ENCRYPTION_KEY` rendrait les secrets déjà chiffrés illisibles.
 
 ## Publier ses propres mises à jour (fork)
 

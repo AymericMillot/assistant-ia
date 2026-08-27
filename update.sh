@@ -88,9 +88,13 @@ apply_remote_package_from_host() {
 
   if [[ -n "${package_sha:-}" ]]; then
     echo "[32%] Vérification du package..."
-    local computed_sha
+    local computed_sha computed_sha_lower package_sha_lower
     computed_sha="$(compute_sha256 "$archive_path")"
-    if [[ "${computed_sha,,}" != "${package_sha,,}" ]]; then
+    # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
+    # cette syntaxe de minification introduite en bash 4.
+    computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
+    package_sha_lower="$(printf '%s' "$package_sha" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$computed_sha_lower" != "$package_sha_lower" ]]; then
       echo "La vérification SHA256 du package a échoué." >&2
       return 1
     fi
@@ -127,7 +131,7 @@ apply_remote_package_from_host() {
   rsync "${rsync_args[@]}" "$package_root"/ "$ROOT_DIR"/
 
   echo "[78%] Redémarrage du backend avec le frontend embarqué..."
-  docker_compose up -d --build backend updater
+  docker_compose_up_build backend updater
   wait_for_backend_ready
 
   echo "[100%] Mise à jour terminée."
@@ -196,7 +200,7 @@ if ! ensure_updater_running; then
 
   echo "Vérification distante indisponible. Reconstruction locale du projet..."
   stop_indexing_if_possible
-  docker_compose up -d --build
+  docker_compose_up_build
   wait_for_backend_ready
   print_access_summary "Mise a jour locale terminee."
   exit 0
@@ -249,6 +253,6 @@ fi
 
 echo "Aucune mise à jour distante disponible. Reconstruction locale du projet..."
 stop_indexing_if_possible
-docker_compose up -d --build
+docker_compose_up_build
 wait_for_backend_ready
 print_access_summary "Mise à jour locale terminée."

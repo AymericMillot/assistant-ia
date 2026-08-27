@@ -1,1 +1,8 @@
-test
+Version 1.059 — audit de fiabilité et préparation au déploiement Linux (27 août 2026).
+
+- secrets locaux sécurisés, synchronisables et exclus des exports ;
+- diagnostic `doctor.sh` renforcé (secrets, permissions, SQLite, services et ancien accès faible) ;
+- images Docker reproductibles, healthchecks et profil frontend de développement corrigé ;
+- dépendances actualisées : aucune vulnérabilité npm connue dans les trois applications ;
+- limites d'upload et d'import Excel, WebSocket authentifié et opérations techniques restreintes ;
+- parcours utilisateur et documentation de déploiement clarifiés.

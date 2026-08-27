@@ -94,17 +94,17 @@ export function getFallbackCatalog() {
 
 let scheduledTask = null;
 
-// Le 1er de chaque mois a 3h locale : hors heures d'usage typiques d'un atelier.
+// Chaque lundi a 3h locale : hors heures d'usage typiques d'un atelier.
 export function scheduleModelCatalogRefresh() {
   if (scheduledTask) {
     return scheduledTask;
   }
 
   scheduledTask = cron.schedule(
-    "0 3 1 * *",
+    "0 3 * * 1",
     () => {
       refreshModelCatalogFromSource().catch((error) => {
-        logger.warn("Actualisation mensuelle du catalogue de modeles echouee.", {
+        logger.warn("Actualisation hebdomadaire du catalogue de modeles echouee.", {
           message: error.message
         });
       });

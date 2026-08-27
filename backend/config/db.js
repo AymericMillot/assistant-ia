@@ -40,7 +40,7 @@ const resolveRuntimePath = (targetPath) =>
 
 const defaultSettings = {
   activeModel: process.env.DEFAULT_MODEL || "gemma2:2b",
-  embeddingModel: process.env.EMBEDDING_MODEL || "nomic-embed-text:latest",
+  embeddingModel: process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest",
   autoIndexEnabled: process.env.AUTO_INDEX_ENABLED ?? "true",
   lastFullIndexAt: "",
   lastIndexedDocumentsCount: "0"
@@ -496,6 +496,12 @@ export function updateAdminUserPasswordById(id, passwordHash) {
   return getDb()
     .prepare("UPDATE admin_users SET password_hash = @passwordHash, updated_at = CURRENT_TIMESTAMP WHERE id = @id")
     .run({ id, passwordHash });
+}
+
+export function updateAdminUserRoleById(id, role) {
+  return getDb()
+    .prepare("UPDATE admin_users SET role = @role, updated_at = CURRENT_TIMESTAMP WHERE id = @id")
+    .run({ id, role });
 }
 
 export function deleteAdminUser(id) {

@@ -33,6 +33,8 @@ function attachmentStatusLabel(attachment) {
 export default function AttachmentManager() {
   const [attachments, setAttachments] = useState([]);
   const [retentionDays, setRetentionDays] = useState(30);
+  const [attachmentsEnabled, setAttachmentsEnabled] = useState(true);
+  const [toggleBusy, setToggleBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -49,6 +51,7 @@ export default function AttachmentManager() {
       const payload = await fetchJson("/api/admin/attachments");
       setAttachments(payload.attachments || []);
       setRetentionDays(payload.retentionDays || 30);
+      setAttachmentsEnabled(payload.attachmentsEnabled !== false);
     } catch (requestError) {
       setError(reportError("attachments:load", requestError));
     } finally {
@@ -61,6 +64,25 @@ export default function AttachmentManager() {
   useEffect(() => {
     loadAttachments();
   }, []);
+
+  async function toggleAttachmentsEnabled() {
+    setToggleBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const payload = await fetchJson("/api/admin/attachments/toggle", {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !attachmentsEnabled })
+      });
+      setAttachmentsEnabled(payload.enabled);
+      setMessage(payload.message);
+    } catch (requestError) {
+      setError(reportError("attachments:toggle", requestError));
+    } finally {
+      setToggleBusy(false);
+    }
+  }
 
   async function keepAttachment(attachment) {
     setLoading(true);
@@ -156,6 +178,25 @@ export default function AttachmentManager() {
             onClick={() => loadAttachments()}
           >
             Actualiser
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/50">
+          <StatusBadge tone={attachmentsEnabled ? "success" : "neutral"}>
+            {attachmentsEnabled ? "Pièces jointes activées" : "Pièces jointes désactivées"}
+          </StatusBadge>
+          <p className="flex-1 text-sm text-slate-500 dark:text-slate-400">
+            {attachmentsEnabled
+              ? "Les utilisateurs peuvent joindre un fichier à leurs questions dans le chat."
+              : "Le bouton pour joindre un fichier est masqué dans le chat, et tout envoi est refusé côté serveur."}
+          </p>
+          <button
+            className="ghost-button shrink-0"
+            type="button"
+            disabled={toggleBusy}
+            onClick={toggleAttachmentsEnabled}
+          >
+            {attachmentsEnabled ? "Désactiver" : "Activer"}
           </button>
         </div>
 

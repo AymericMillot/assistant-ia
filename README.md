@@ -98,7 +98,7 @@ fablab-ai/
 ├── update.sh
 ├── restart.sh
 ├── stop.sh
-├── password
+├── password.sh
 ├── README.md
 ├── backend/
 └── frontend/
@@ -113,6 +113,18 @@ Les dossiers importants sont :
 ## Demarrage rapide avec install.sh
 
 Si tu veux la methode la plus simple, utilise `install.sh`.
+
+### Windows, en une commande
+
+Depuis un terminal PowerShell, sans avoir a cloner le depot au prealable :
+
+```powershell
+irm https://maj.aymericmillot.com/iutlab/web-install.ps1 | iex
+```
+
+Cette commande telecharge le projet dans `%USERPROFILE%\fablab-ai`, l'extrait, puis lance
+l'installation. Comme elle s'execute par evaluation de chaine (`iex`), elle n'est jamais bloquee
+par la politique d'execution de scripts de Windows.
 
 Depuis le dossier du projet :
 
@@ -138,12 +150,22 @@ En environnement sans terminal interactif (CI, provisionnement automatise) :
 ./install.sh --non-interactive
 ```
 
+Pour installer une version precise (ex. revenir a une version anterieure) plutot que les
+fichiers locaux actuels, recuperee directement depuis le serveur de mise a jour :
+
+```bash
+./install.sh --v1.000
+```
+
+Le script telecharge cette version, verifie son integrite (SHA256), remplace les fichiers du
+projet par ceux de cette version, puis poursuit l'installation normalement avec ces fichiers.
+
 ## Ce que fait install.sh
 
 Le script prepare automatiquement le projet :
 
 1. verifie que Docker est installe et que le daemon tourne (guidage adapte a l'OS sinon)
-2. cree le fichier `.env` si besoin et genere `CONFIG_ENCRYPTION_KEY` si absente
+2. cree le fichier `.env`, génère les secrets absents et le protège avec des permissions restrictives
 3. verifie qu'aucun probleme courant ne bloquera l'installation (port deja utilise, espace disque)
 4. cree les dossiers par defaut pour les documents
 5. propose une personnalisation interactive (nom du projet, modele Ollama ou questionnaire
@@ -152,7 +174,7 @@ Le script prepare automatiquement le projet :
 6. lance les services Docker necessaires et attend qu'Ollama soit pret
 7. telecharge le modele principal choisi (ou par defaut) et le modele d'embedding
 8. demarre toute la plateforme
-9. genere et affiche le mot de passe administrateur initial (changement impose a la premiere
+9. genere et affiche le mot de passe enseignant initial (changement impose a la premiere
    connexion)
 
 Une fois termine, tu peux ouvrir :
@@ -162,10 +184,11 @@ Une fois termine, tu peux ouvrir :
 
 ## Scripts simples a connaitre
 
-Pour rendre l'utilisation du projet la plus simple possible, tu peux tout piloter avec 4 scripts :
+Pour rendre l'utilisation du projet la plus simple possible, tu peux tout piloter avec ces scripts :
 
 ```bash
 ./install.sh
+./doctor.sh
 ./export.sh
 ./update.sh
 ./restart.sh
@@ -185,7 +208,16 @@ Ce script :
 - construit les images Docker
 - demarre toute la plateforme
 
-### 2. Mettre a jour le projet
+### 2. Diagnostiquer et réparer
+
+```bash
+./doctor.sh
+```
+
+Utilise `./doctor.sh --check-only` pour un audit sans modification, ou `./doctor.sh --yes` pour
+appliquer automatiquement les réparations sûres sur un serveur sans terminal.
+
+### 3. Mettre a jour le projet
 
 ```bash
 ./update.sh
@@ -203,7 +235,7 @@ Tu peux aussi seulement verifier s'il y a une mise a jour :
 ./update.sh --check-only
 ```
 
-### 3. Exporter le projet pour une autre machine
+### 4. Exporter le projet pour une autre machine
 
 ```bash
 ./export.sh
@@ -230,7 +262,7 @@ Si tu veux cloner aussi les données actuelles :
 ./export.sh --with-data
 ```
 
-### 4. Redemarrer le projet
+### 5. Redemarrer le projet
 
 ```bash
 ./restart.sh
@@ -242,7 +274,7 @@ Ce script :
 - redemarre les services
 - ou les lance si le projet etait eteint
 
-### 5. Arreter le projet
+### 6. Arreter le projet
 
 ```bash
 ./stop.sh
@@ -253,15 +285,13 @@ Ce script :
 - tente d'arreter les indexations
 - arrete ensuite toute la plateforme Docker
 
-## Comment recuperer le mot de passe admin
+## Comment récupérer les accès admin
 
-Le mot de passe admin n'est pas affiche directement par `install.sh`.
-
-Pour l'obtenir :
+Pour afficher le mot de passe administratif temporaire :
 
 ```bash
 cd "/chemin/vers/fablab-ai"
-./password
+./password.sh
 ```
 
 ## Comment utiliser le projet
@@ -284,7 +314,8 @@ Ouvre :
 
 - [http://localhost:3000/admin](http://localhost:3000/admin)
 
-Puis entre le mot de passe temporaire.
+Connectez-vous avec les identifiants administratifs qui vous ont été attribués. Les fonctions
+sensibles sont accessibles uniquement aux comptes autorisés.
 
 Dans l'admin, tu peux :
 
@@ -440,7 +471,7 @@ docker compose logs -f backend
 ### Reafficher le mot de passe admin
 
 ```bash
-./password
+./password.sh
 ```
 
 ## Si quelque chose ne marche pas
@@ -469,7 +500,7 @@ Pour un debutant, la procedure la plus simple est :
 cd "/chemin/vers/fablab-ai"
 chmod +x install.sh
 ./install.sh
-./password
+./password.sh
 ```
 
 Puis :

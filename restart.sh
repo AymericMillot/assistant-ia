@@ -34,7 +34,11 @@ else
   docker_compose up -d ollama chromadb redis backend
 fi
 
-docker_compose up -d updater >/dev/null 2>&1 || true
+echo "Demarrage du service de mise a jour..."
+if ! docker_compose_up_required updater; then
+  echo "Le service de mise a jour n'a pas pu demarrer : le projet ne peut pas fonctionner correctement sans lui." >&2
+  exit 1
+fi
 
 wait_for_backend_ready
 print_access_summary "Redemarrage termine."

@@ -107,17 +107,22 @@ fi
 
 echo "Redemarrage des services..."
 docker_compose up -d ollama chromadb redis backend
-docker_compose up -d updater >/dev/null 2>&1 || true
+
+echo "Demarrage du service de mise a jour..."
+if ! docker_compose_up_required updater; then
+  echo "Le service de mise a jour n'a pas pu demarrer : le projet ne peut pas fonctionner correctement sans lui." >&2
+  exit 1
+fi
 
 wait_for_backend_ready
 
-echo "Generation d'un nouveau mot de passe administrateur..."
+echo "Generation d'un nouveau mot de passe enseignant..."
 GENERATED_TEACHER_PASSWORD="$(
   docker_compose exec -T backend node scripts/reset-teacher-password.js 2>/dev/null | tail -n 2 | head -n 1 || true
 )"
 
 print_access_summary "Reinitialisation terminee. Toutes les donnees et parametres ont ete supprimes."
 if [[ -n "$GENERATED_TEACHER_PASSWORD" ]]; then
-  echo "Nouveau mot de passe administrateur : ${GENERATED_TEACHER_PASSWORD} (changement impose a la premiere connexion)"
+  echo "Nouveau mot de passe enseignant : ${GENERATED_TEACHER_PASSWORD} (changement impose a la premiere connexion)"
   echo
 fi

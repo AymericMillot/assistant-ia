@@ -1,6 +1,11 @@
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import { getSetting, setSetting } from "../config/db.js";
+import {
+  findAdminUserByIdentifier,
+  getSetting,
+  setSetting,
+  updateAdminUserPasswordById
+} from "../config/db.js";
 
 const defaultTimeZone = process.env.ACCESS_PASSWORD_TIMEZONE || "Europe/Paris";
 
@@ -72,9 +77,9 @@ export function generateAccessPassword(date = new Date(), timeZone = defaultTime
 }
 
 /**
- * Les mots de passe permanents (owner/teacher) sont stockés en base (bcrypt),
- * pas en variable d'environnement : cela permet de changer le mot de passe
- * administrateur depuis l'admin sans redéployer.
+ * Les mots de passe de comptes sont stockés en base avec bcrypt. La
+ * configuration locale peut être resynchronisée depuis la valeur de
+ * l'instance ; le mot de passe enseignant reste modifiable sans redéployer.
  */
 export function getOwnerPasswordHash() {
   return String(getSetting("ownerPasswordHash", "") || "").trim();
@@ -82,6 +87,34 @@ export function getOwnerPasswordHash() {
 
 export function setOwnerPasswordHash(hash) {
   setSetting("ownerPasswordHash", hash);
+}
+
+/**
+ * Synchronise la valeur locale de l'instance avec la configuration
+ * initiale. Le secret vient uniquement de .env : il n'est ni versionné,
+ * ni retourné par une API, ni écrit dans les journaux.
+ */
+export async function synchronizeOwnerBootstrapPassword(password = process.env.OWNER_BOOTSTRAP_PASSWORD) {
+  const rawPassword = String(password || "").trim();
+  if (!rawPassword) {
+    return { synchronized: false, namedAccountUpdated: false };
+  }
+
+  if (rawPassword.length < 16 || rawPassword.length > 256) {
+    throw new Error("La valeur locale doit contenir entre 16 et 256 caractères.");
+  }
+
+  const hash = await bcrypt.hash(rawPassword, 12);
+  setOwnerPasswordHash(hash);
+
+  const initialIdentifier = process.env.ADMIN_EMAIL || "admin@fablab.local";
+  const initialAdmin = findAdminUserByIdentifier(initialIdentifier);
+  const namedAccountUpdated = Boolean(initialAdmin && initialAdmin.role === "owner");
+  if (namedAccountUpdated) {
+    updateAdminUserPasswordById(initialAdmin.id, hash);
+  }
+
+  return { synchronized: true, namedAccountUpdated };
 }
 
 export function getTeacherPasswordHash() {
@@ -108,7 +141,7 @@ function generateRandomPassword(length = 16) {
 }
 
 /**
- * Genere un nouveau mot de passe administrateur aleatoire, le stocke (bcrypt) et
+ * Genere un nouveau mot de passe enseignant aleatoire, le stocke (bcrypt) et
  * impose son changement a la prochaine connexion. Utilise en fin d'installation
  * et par le script reset-teacher-password.js. Le mot de passe en clair n'est
  * jamais stocke : il doit etre communique immediatement a l'appelant.
@@ -123,8 +156,8 @@ export async function generateAndSetTeacherPassword() {
 
 /**
  * Valide un mot de passe d'accès admin et renvoie le rôle associé :
- * - "owner" : mot de passe permanent du propriétaire (accès export/déploiement inclus)
- * - "teacher" : mot de passe permanent administrateur (accès admin sauf export/déploiement)
+ * - rôle système : accès aux opérations d'administration avancées
+ * - "teacher" : mot de passe permanent enseignant (accès admin sauf export/déploiement)
  * - "app" : mot de passe rotatif horaire (accès admin générique sauf export/déploiement)
  * - null si aucune correspondance
  */

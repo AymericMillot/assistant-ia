@@ -154,23 +154,8 @@ export function formatDuration(seconds) {
     return `${Math.round(numericSeconds)} s`;
   }
 
-  const totalSeconds = Math.round(numericSeconds);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainingSeconds = totalSeconds % 60;
-
-  // Au-dela d'une minute, on affiche les deux unites les plus significatives
-  // (ex: "2 j 5 h", "3 h 12 min", "5 min 30 s") plutot que de tout ecraser en
-  // minutes, illisible passe quelques heures d'activite.
-  if (days > 0) {
-    return hours > 0 ? `${days} j ${hours} h` : `${days} j`;
-  }
-
-  if (hours > 0) {
-    return minutes > 0 ? `${hours} h ${minutes} min` : `${hours} h`;
-  }
-
+  const minutes = Math.floor(numericSeconds / 60);
+  const remainingSeconds = Math.round(numericSeconds % 60);
   if (remainingSeconds === 0) {
     return `${minutes} minute${minutes > 1 ? "s" : ""}`;
   }

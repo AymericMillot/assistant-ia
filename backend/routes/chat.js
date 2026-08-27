@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { getLiveChatEstimate } from "../services/analyticsService.js";
-import { getDocumentById } from "../config/db.js";
+import { getDocumentById, getSetting } from "../config/db.js";
 import {
   buildAnonymousUserId,
   resolveConversationSessionId,
@@ -11,10 +11,11 @@ import {
   generateChatResponse,
   processDirectChatRequest,
   registerChatStream,
-  cancelChatJobsForClient
+  cancelChatJobsForClient,
+  getCurrentQueueDepth
 } from "../services/queueService.js";
 import { getAbsoluteDocumentPath, listFolders } from "../services/fileService.js";
-import { getActiveModel } from "../services/ollamaService.js";
+import { getActiveModel, getActiveModelByRole } from "../services/ollamaService.js";
 import { getConversationContextSummary } from "../services/ragService.js";
 import { markActivity } from "../services/schedulerService.js";
 import {
@@ -54,6 +55,23 @@ const ratingRateLimiter = createRateLimiter({
   keyPrefix: "chat-rating",
   message: "Trop d'évaluations en peu de temps. Réessayez dans quelques minutes."
 });
+// Le raisonnement approfondi est nettement plus coûteux en ressources qu'une
+// reponse normale : limite dediee et stricte (independante du rate limit
+// general du chat), qui ne s'applique que lorsque le mode est demande.
+const reasoningRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 1,
+  keyPrefix: "chat-reasoning",
+  message: "Le raisonnement approfondi est limité à une utilisation toutes les 5 minutes. Réessayez plus tard."
+});
+
+function requireReasoningRateLimit(req, res, next) {
+  if (req.body?.useReasoningModel) {
+    return reasoningRateLimiter(req, res, next);
+  }
+
+  next();
+}
 
 function parseAttachmentIds(value) {
   if (!Array.isArray(value)) {
@@ -151,11 +169,16 @@ router.get("/folders", async (_req, res, next) => {
 router.post("/estimate", chatEstimateRateLimiter, async (req, res, next) => {
   try {
     const question = req.body?.question ? ensureSafeText(req.body.question, "Question", { max: 4000 }) : "";
+    const useReasoningModel = Boolean(req.body?.useReasoningModel);
+    // Le modele de raisonnement est nettement plus lent : l'estimer avec le modele de
+    // conversation habituel donnerait un temps trompeur quand l'option est activee.
+    const modelName = (useReasoningModel && getActiveModelByRole("reasoning")) || getActiveModel();
+    const queueDepth = await getCurrentQueueDepth();
     const estimate = getLiveChatEstimate({
       question,
       folderName: "all",
-      modelName: getActiveModel(),
-      queueDepth: 0
+      modelName,
+      queueDepth
     });
 
     res.json(estimate);
@@ -164,17 +187,19 @@ router.post("/estimate", chatEstimateRateLimiter, async (req, res, next) => {
   }
 });
 
-router.post("/", chatStreamRateLimiter, async (req, res, next) => {
+router.post("/", chatStreamRateLimiter, requireReasoningRateLimit, async (req, res, next) => {
   try {
     const { question, history, sessionId } = extractConversationPayload(req.body);
     const attachmentIds = parseAttachmentIds(req.body?.attachmentIds);
+    const useReasoningModel = Boolean(req.body?.useReasoningModel);
     markActivity();
 
     const payload = await generateChatResponse({
       question,
       folderName: "all",
       history,
-      attachmentIds
+      attachmentIds,
+      useReasoningModel
     });
     let savedExchange = null;
 
@@ -213,9 +238,20 @@ function handleAttachmentUpload(req, res, next) {
   });
 }
 
+function requireAttachmentsEnabled(req, res, next) {
+  if (getSetting("attachmentsEnabled", "true") !== "true") {
+    return res.status(403).json({
+      message: "Les pièces jointes sont désactivées par l'administrateur."
+    });
+  }
+
+  next();
+}
+
 router.post(
   "/attachments",
   attachmentRateLimiter,
+  requireAttachmentsEnabled,
   handleAttachmentUpload,
   async (req, res, next) => {
     try {
@@ -296,11 +332,12 @@ router.get("/documents/:id/download", async (req, res, next) => {
   }
 });
 
-router.post("/stream", chatStreamRateLimiter, async (req, res, next) => {
+router.post("/stream", chatStreamRateLimiter, requireReasoningRateLimit, async (req, res, next) => {
   try {
     const { question, history, sessionId } = extractConversationPayload(req.body);
     const clientId = ensureUuidLike(req.body?.clientId, "Identifiant client");
     const attachmentIds = parseAttachmentIds(req.body?.attachmentIds);
+    const useReasoningModel = Boolean(req.body?.useReasoningModel);
 
     markActivity();
 
@@ -312,7 +349,9 @@ router.post("/stream", chatStreamRateLimiter, async (req, res, next) => {
 
     registerChatStream(clientId, res);
     writeSseEvent(res, "session", { sessionId });
-    writeSseEvent(res, "context", getConversationContextSummary(history));
+
+    const contextModelName = (useReasoningModel && getActiveModelByRole("reasoning")) || getActiveModel();
+    writeSseEvent(res, "context", await getConversationContextSummary(history, contextModelName));
 
     res.on("close", async () => {
       if (res.writableEnded) {
@@ -330,6 +369,7 @@ router.post("/stream", chatStreamRateLimiter, async (req, res, next) => {
       folderName: "all",
       history,
       attachmentIds,
+      useReasoningModel,
       persistExchange: (finalText, retrievalMetadata) =>
         saveConversationExchange({
           sessionId,

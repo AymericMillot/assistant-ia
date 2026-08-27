@@ -27,10 +27,11 @@ import {
   setSetting,
   setSettingEncrypted,
   updateAdminUserPasswordById,
+  updateAdminUserRoleById,
   updateManualResource
 } from "../config/db.js";
 import { clearIndexationLogs, getRecentIndexationLogs, logger } from "../config/logger.js";
-import { getModelCatalog } from "../config/modelCatalog.js";
+import { detectProvider, getModelCatalog } from "../config/modelCatalog.js";
 import {
   getModelCatalogCacheInfo,
   refreshModelCatalogFromSource
@@ -146,7 +147,7 @@ function parseOptionalBoolean(value) {
 
 router.use(authMiddleware);
 router.use((req, res, next) => {
-  if (["POST", "PATCH", "DELETE"].includes(req.method)) {
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
     return adminMutationRateLimiter(req, res, next);
   }
 
@@ -749,7 +750,28 @@ router.get("/attachments", async (_req, res, next) => {
   try {
     res.json({
       attachments: listAttachments(),
-      retentionDays: Number(process.env.USER_ATTACHMENT_RETENTION_DAYS || 30)
+      retentionDays: Number(process.env.USER_ATTACHMENT_RETENTION_DAYS || 30),
+      attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true"
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch("/attachments/toggle", (req, res, next) => {
+  try {
+    const { enabled } = req.body || {};
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ message: "La valeur enabled doit etre booleenne." });
+    }
+
+    markActivity();
+    setSetting("attachmentsEnabled", String(enabled));
+    res.json({
+      message: enabled
+        ? "Les pièces jointes sont maintenant autorisées dans le chat."
+        : "Les pièces jointes sont désormais désactivées dans le chat.",
+      enabled
     });
   } catch (error) {
     next(error);
@@ -1264,7 +1286,7 @@ router.post("/models/recommend", (req, res, next) => {
 });
 
 router.get("/models", async (_req, res) => {
-  const embeddingModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text:latest");
+  const embeddingModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest");
 
   try {
     const models = await ollamaService.listVisibleModels();
@@ -1272,14 +1294,24 @@ router.get("/models", async (_req, res) => {
     // on l'expose separement, avec la liste complete (non filtree), pour permettre
     // d'en choisir un autre parmi tous les modeles installes.
     const allModels = await ollamaService.listModels();
+    const withProvider = (list) => list.map((model) => ({ ...model, provider: detectProvider(model.name) }));
+    // Taille de contexte reelle par modele (via /api/show, mise en cache cote service) : affichee
+    // dans l'admin pour que chaque modele indique sa capacite exacte plutot qu'une valeur generique.
+    const withContextLength = async (list) =>
+      Promise.all(
+        list.map(async (model) => ({
+          ...model,
+          contextLength: await ollamaService.getModelContextLength(model.name)
+        }))
+      );
     res.json({
       activeModel: ollamaService.getActiveModel(),
       activeTextModel: ollamaService.getActiveModelByRole("text"),
       activeImageModel: ollamaService.getActiveModelByRole("image"),
       activeReasoningModel: ollamaService.getActiveModelByRole("reasoning"),
       embeddingModel,
-      models,
-      allModels,
+      models: await withContextLength(withProvider(models)),
+      allModels: withProvider(allModels),
       ollamaAvailable: true
     });
   } catch {
@@ -1394,7 +1426,7 @@ router.put("/models/embedding", requireRole("owner"), async (req, res, next) => 
       });
     }
 
-    const previousModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text:latest");
+    const previousModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest");
     if (previousModel === modelName) {
       return res.json({
         message: "Ce modele d'embedding est deja actif.",
@@ -1511,7 +1543,7 @@ router.post("/models/pull", async (req, res, next) => {
 });
 
 router.use((req, _res, next) => {
-  if (["POST", "PATCH", "DELETE"].includes(req.method)) {
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
     return adminMutationRateLimiter(req, _res, next);
   }
 
@@ -1542,7 +1574,7 @@ router.get("/update/status", async (_req, res, next) => {
   }
 });
 
-router.get("/update/backups", async (_req, res, next) => {
+router.get("/update/backups", requireRole("owner"), async (_req, res, next) => {
   try {
     const payload = await updateService.getUpdateBackups();
     res.json(payload);
@@ -1564,7 +1596,7 @@ router.get("/update/backups", async (_req, res, next) => {
   }
 });
 
-router.post("/update/apply", async (req, res, next) => {
+router.post("/update/apply", requireRole("owner"), async (req, res, next) => {
   try {
     markActivity();
     const targetVersionRaw = String(req.body?.targetVersion || "").trim();
@@ -1584,7 +1616,7 @@ router.post("/update/apply", async (req, res, next) => {
   }
 });
 
-router.post("/update/rollback", async (req, res, next) => {
+router.post("/update/rollback", requireRole("owner"), async (req, res, next) => {
   try {
     markActivity();
     const backupId = ensureSafeIdentifier(req.body?.backupId, "Sauvegarde", { max: 80 });
@@ -1601,7 +1633,7 @@ router.post("/update/rollback", async (req, res, next) => {
   }
 });
 
-// Export et deploiement : reserve au role "owner".
+// Export et déploiement.
 router.get("/deployment/ftp-config", requireRole("owner"), (_req, res) => {
   const host = getSetting("deployFtpHost", "");
   const remoteDir = getSetting("deployFtpRemoteDir", "");
@@ -1929,7 +1961,7 @@ router.get("/analytics/unanswered-questions", async (req, res, next) => {
   }
 });
 
-// Journal d'audit : reserve au role "owner" (vision d'ensemble de toutes les actions admin).
+// Journal d'audit.
 router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
   try {
     const page = req.query?.page ? parsePositiveInt(req.query.page, "Page") : 1;
@@ -1939,6 +1971,15 @@ router.get("/audit-log", requireRole("owner"), async (req, res, next) => {
     next(error);
   }
 });
+
+function ensureAdminRole(value) {
+  if (value === "owner" || value === "teacher") {
+    return value;
+  }
+  const error = new Error("Rôle de compte invalide.");
+  error.statusCode = 400;
+  throw error;
+}
 
 function ensureAdminIdentifiant(value) {
   const identifiant = ensureSafeText(value, "Identifiant", { min: 3, max: 120 });
@@ -1961,12 +2002,7 @@ function requireExistingAdminUser(id) {
 }
 
 // Comptes admin nommes (identifiant + mot de passe propres) : reserve au role
-// "owner", pour creer des acces distincts en plus des mots de passe partages
-// owner/administrateur/rotatif geres ailleurs. Le role "owner" n'est jamais
-// assignable via cette API (ni a la creation, ni en modification) : il n'y a
-// qu'un seul proprietaire, defini une fois pour toutes a l'installation
-// (ADMIN_EMAIL/ADMIN_PASSWORD_HASH). Tout compte cree ici est un compte
-// "administrateur" ordinaire, sans possibilite de s'auto-promouvoir.
+// Gestion des comptes nommés.
 router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
   try {
     res.json({ users: listAdminUsers() });
@@ -1978,12 +2014,13 @@ router.get("/admin-users", requireRole("owner"), (_req, res, next) => {
 router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
   try {
     const identifiant = ensureAdminIdentifiant(req.body?.identifiant);
-    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 8, max: 256 });
+    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 12, max: 256 });
+    const role = ensureAdminRole(req.body?.role);
 
     const passwordHash = await bcrypt.hash(password, 12);
     let user;
     try {
-      user = createAdminUser({ identifier: identifiant, passwordHash, role: "teacher" });
+      user = createAdminUser({ identifier: identifiant, passwordHash, role });
     } catch (dbError) {
       if (String(dbError?.code || "").includes("CONSTRAINT")) {
         const error = new Error("Cet identifiant est deja utilise.");
@@ -1995,7 +2032,8 @@ router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
 
     logAudit(req, "admin-users.create", {
       targetType: "admin_user",
-      targetId: user.id
+      targetId: user.id,
+      details: { identifiant, role }
     });
     res.status(201).json({ user });
   } catch (error) {
@@ -2006,13 +2044,33 @@ router.post("/admin-users", requireRole("owner"), async (req, res, next) => {
 router.put("/admin-users/:id/password", requireRole("owner"), async (req, res, next) => {
   try {
     const id = parsePositiveInt(req.params.id, "Identifiant du compte");
-    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 8, max: 256 });
+    const password = ensureSafeText(req.body?.password, "Mot de passe", { min: 12, max: 256 });
     requireExistingAdminUser(id);
 
     const passwordHash = await bcrypt.hash(password, 12);
     updateAdminUserPasswordById(id, passwordHash);
     logAudit(req, "admin-users.reset-password", { targetType: "admin_user", targetId: id });
     res.json({ message: "Mot de passe mis a jour." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put("/admin-users/:id/role", requireRole("owner"), (req, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id, "Identifiant du compte");
+    const role = ensureAdminRole(req.body?.role);
+    const target = requireExistingAdminUser(id);
+
+    if (target.role === "owner" && role !== "owner" && countAdminUsersByRole("owner") <= 1) {
+      const error = new Error("Impossible de retirer le rôle du dernier compte principal.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    updateAdminUserRoleById(id, role);
+    logAudit(req, "admin-users.update-role", { targetType: "admin_user", targetId: id, details: { role } });
+    res.json({ message: "Role mis a jour." });
   } catch (error) {
     next(error);
   }
@@ -2029,7 +2087,7 @@ router.delete("/admin-users/:id", requireRole("owner"), (req, res, next) => {
 
     const target = requireExistingAdminUser(id);
     if (target.role === "owner" && countAdminUsersByRole("owner") <= 1) {
-      const error = new Error("Impossible de supprimer le dernier compte proprietaire.");
+      const error = new Error("Impossible de supprimer le dernier compte principal.");
       error.statusCode = 400;
       throw error;
     }

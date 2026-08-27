@@ -113,13 +113,6 @@ export async function fetchOllamaLibraryModels() {
       return;
     }
 
-    // Modeles specialises dans la generation de code (coder, codellama,
-    // codegemma, starcoder...) : hors sujet pour un assistant documentaire
-    // general, donc exclus du catalogue de suggestions.
-    if (/code/i.test(name)) {
-      return;
-    }
-
     models.push({
       name,
       description,

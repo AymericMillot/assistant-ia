@@ -11,6 +11,12 @@ services:
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
       OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
 
   chromadb:
     image: chromadb/chroma:latest
@@ -20,6 +26,16 @@ services:
     # Docker interne (les autres services y accedent par le nom "chromadb").
     volumes:
       - chroma_:/chroma/chroma
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/bash
+        - -c
+        - ": > /dev/tcp/127.0.0.1/8000"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
@@ -27,6 +43,11 @@ services:
     restart: unless-stopped
     # Aucun port publie sur l'hote : accessible uniquement via le reseau
     # Docker interne (les autres services y accedent par le nom "redis").
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
@@ -37,17 +58,30 @@ services:
     ports:
       - "${SERVER_BIND_HOST:-0.0.0.0}:${PORT:-3000}:${PORT:-3000}"
     depends_on:
-      - ollama
-      - chromadb
-      - redis
+      ollama:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ${PROJECT_WORKSPACE_DIR:-.}/backend/uploads:/app/uploads
       - ${PROJECT_WORKSPACE_DIR:-.}/backend/logs:/app/logs
       - ${PROJECT_WORKSPACE_DIR:-.}/backend/data:/app/data
+      # Monte en lecture seule : la version affichee reste toujours celle reelle
+      # de version.json sur l'hote, meme sans reconstruire l'image (celle-ci
+      # n'etait sinon mise a jour qu'au prochain build, pouvant afficher un
+      # numero perime apres un export/publication sans reconstruction).
       - ${PROJECT_WORKSPACE_DIR:-.}/version.json:/app/version.json:ro
       - ${PROJECT_WORKSPACE_DIR:-.}/update.config.json:/app/update.config.json:ro
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-3000}/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   frontend:
     profiles:
@@ -57,9 +91,12 @@ services:
     container_name: fablab-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${FRONTEND_DEV_PORT:-3001}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    env_file:
+      - .env
 
   updater:
     build:
@@ -77,6 +114,12 @@ services:
       UPDATE_PROJECT_NAME: fablab-ai
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3010/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
 volumes:
   ollama_:

@@ -152,10 +152,10 @@ const baseTabs = [
   { id: "modeles", label: "Modèles" },
   { id: "indexation", label: "Indexation" },
   { id: "performance", label: "Performance" },
-  { id: "donnees", label: "Données" },
-  { id: "mise-a-jour", label: "Mise à jour" }
+  { id: "donnees", label: "Données" }
 ];
 const ownerOnlyTabs = [
+  { id: "mise-a-jour", label: "Mise à jour" },
   { id: "comptes-admin", label: "Comptes admin" },
   { id: "audit", label: "Audit" },
   { id: "export-deploiement", label: "Export et déploiement" }
@@ -267,7 +267,7 @@ export default function ModelAdminPage() {
             <AccessGate
               embedded
               heading="Reconnecter l'administration."
-              description="Entrez à nouveau le mot de passe temporaire pour reprendre la session."
+              description="Entrez à nouveau votre accès administrateur pour reprendre la session."
               submitLabel="Se reconnecter"
               onCancel={() => setShowReconnect(false)}
               onAuthenticated={() => {

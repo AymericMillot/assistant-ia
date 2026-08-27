@@ -18,7 +18,7 @@ docker compose logs -f backend   # Stream backend logs
 ### Password management
 
 ```bash
-./password                                     # Show current rotating admin password
+./password.sh                                     # Show current rotating admin password
 cd backend && npm run password:current         # Same via npm script
 cd backend && npm run password:reset-teacher   # Generate a new teacher password (forces change at next login)
 ```
@@ -49,7 +49,7 @@ The project is a local RAG-based AI assistant, generic and configurable for any 
 1. User submits a question at `GET /` (public, no auth)
 2. Frontend sends to `POST /api/chat` → `backend/routes/chat.js`
 3. Request enters a **Bull queue** (`queueService.js`) backed by Redis — enforces one active chat at a time
-4. `ragService.js` embeds the question via Ollama (`nomic-embed-text`), searches ChromaDB per-folder collections, ranks chunks, and builds a context string
+4. `ragService.js` embeds the question via Ollama (`nomic-embed-text-v2-moe`), searches ChromaDB per-folder collections, ranks chunks, and builds a context string
 5. Context + conversation history + enabled `manual_resources` (instructions/links from DB) + `improvement_rules` (feedback-derived rules) are assembled into a prompt
 6. Prompt is streamed to Ollama (`ollamaService.js`), and tokens are forwarded to the client via **Socket.IO** (`realtimeService.js`)
 
@@ -98,7 +98,7 @@ React SPA with `react-router-dom`. Routes: `/` (UserChat), `/admin` (ModelAdminP
 | `ADMIN_ACCESS_MODE` | `any` (default) or `local` (restrict admin to local network) |
 | `DEFAULT_MODEL` | Ollama model used for chat (role "text") |
 | `EMBEDDING_MODEL` | Ollama model used for embeddings |
-| `MODEL_CATALOG_SOURCE_URL` | Optional remote JSON URL for monthly model catalog refresh; empty = static catalog only |
+| `MODEL_CATALOG_SOURCE_URL` | Optional remote JSON URL for weekly model catalog refresh; empty = static catalog only |
 | `CHAT_HISTORY_LIMIT` / `CHAT_HISTORY_MAX_CHARACTERS` | Conversation memory window shown by the context gauge in the chat UI |
 | `PROJECT_WORKSPACE_DIR` | Absolute path to repo root, used for Docker volume mounts |
 

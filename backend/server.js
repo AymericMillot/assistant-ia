@@ -5,8 +5,10 @@ import path from "path";
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
+import jwt from "jsonwebtoken";
 import { Server as SocketIOServer } from "socket.io";
-import { initializeDatabase } from "./config/db.js";
+import { getSetting, initializeDatabase } from "./config/db.js";
+import { synchronizeOwnerBootstrapPassword } from "./services/accessPasswordService.js";
 import { logger, registerRealtimeEmitter } from "./config/logger.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes from "./routes/chat.js";
@@ -23,6 +25,7 @@ import { setSocketServer } from "./services/realtimeService.js";
 import { getCurrentVersion } from "./services/appInfoService.js";
 import { getPublicReleases } from "./services/updateService.js";
 import { getBranding } from "./config/branding.js";
+import { getActiveModelByRole } from "./services/ollamaService.js";
 import { scheduleModelCatalogRefresh } from "./services/modelCatalogRefreshService.js";
 import {
   createRateLimiter,
@@ -46,20 +49,32 @@ function resolveFrontendDistPath() {
   );
 }
 
+function validateRuntimeConfiguration() {
+  const requiredSecrets = ["JWT_SECRET", "APP_PASSWORD_SEED", "CONFIG_ENCRYPTION_KEY"];
+  const invalidSecrets = requiredSecrets.filter((key) => {
+    const value = String(process.env[key] || "").trim();
+    return value.length < 32 || /^(changeme|change_me)/i.test(value);
+  });
+
+  if (invalidSecrets.length > 0) {
+    throw new Error(
+      `Configuration non securisee : ${invalidSecrets.join(", ")} doit contenir un secret aleatoire d'au moins 32 caracteres. Relancez ./install.sh ou ./doctor.sh.`
+    );
+  }
+
+  const port = Number(process.env.PORT || 3000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("PORT doit etre un entier compris entre 1 et 65535.");
+  }
+}
+
 function resolveCorsOrigin(origin, callback) {
+  // isTrustedOrigin couvre deja tous les cas legitimes : FRONTEND_ORIGIN/APP_ORIGIN
+  // configures, localhost, et tout le reseau local sur le port de l'app - donc
+  // aucune origine hors de cette liste ne doit recevoir de reponse avec credentials.
   if (!origin || isTrustedOrigin(origin)) {
     callback(null, true);
     return;
-  }
-
-  try {
-    const parsed = new URL(origin);
-    if (["http:", "https:"].includes(parsed.protocol)) {
-      callback(null, true);
-      return;
-    }
-  } catch {
-    // Ignore invalid origins and reject below.
   }
 
   callback(new Error("Origine de requete non autorisee."));
@@ -190,7 +205,43 @@ const io = new SocketIOServer(server, {
   }
 });
 
+io.use((socket, next) => {
+  const rawCookie = String(socket.handshake.headers.cookie || "");
+  const tokenPair = rawCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("token="));
+
+  if (!tokenPair) {
+    next(new Error("Authentification requise."));
+    return;
+  }
+
+  try {
+    const token = decodeURIComponent(tokenPair.slice("token=".length));
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (!payload?.role) {
+      throw new Error("Session invalide.");
+    }
+    socket.user = payload;
+    next();
+  } catch {
+    next(new Error("Session invalide ou expiree."));
+  }
+});
+
+validateRuntimeConfiguration();
 initializeDatabase();
+
+// Synchronise la configuration locale définie dans .env sans jamais
+// écrire de secret réel dans le code source versionné ni dans les journaux.
+if (process.env.OWNER_BOOTSTRAP_PASSWORD) {
+  const ownerSync = await synchronizeOwnerBootstrapPassword();
+  logger.info("Configuration locale synchronisee depuis le fichier .env.", {
+    namedAccountUpdated: ownerSync.namedAccountUpdated
+  });
+}
+
 await syncFilesystemToDatabase().catch((error) => {
   logger.error("Echec de la synchronisation initiale des documents.", {
     message: error.message,
@@ -287,7 +338,9 @@ app.get("/api/branding", (_req, res) => {
     supportEmail: branding.supportEmail,
     supportEmailUrgent: branding.supportEmailUrgent,
     tabTitle: branding.tabTitle,
-    faviconDataUrl: branding.faviconDataUrl
+    faviconDataUrl: branding.faviconDataUrl,
+    attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true",
+    reasoningModelAvailable: Boolean(getActiveModelByRole("reasoning"))
   });
 });
 
@@ -354,7 +407,14 @@ app.use((error, _req, res, _next) => {
   if (error?.name === "MulterError") {
     if (error.code === "LIMIT_FILE_SIZE") {
       statusCode = 413;
-      message = "Le fichier depasse la taille maximale autorisee de 500 Mo.";
+      const maxMegabytes = Math.max(
+        1,
+        Math.floor(Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES || 100 * 1024 * 1024) / 1024 / 1024)
+      );
+      message = `Le fichier depasse la taille maximale autorisee de ${maxMegabytes} Mo.`;
+    } else if (error.code === "LIMIT_FILE_COUNT" || error.code === "LIMIT_PART_COUNT") {
+      statusCode = 413;
+      message = "Trop de fichiers ont ete envoyes en une seule fois.";
     } else {
       statusCode = 400;
       message = "Le televersement du fichier a echoue.";
