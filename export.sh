@@ -57,7 +57,11 @@ read_project_version() {
 }
 
 PROJECT_VERSION="$(read_project_version)"
-SAFE_PROJECT_VERSION="$(printf "%s" "$PROJECT_VERSION" | tr -cs '[:alnum:]._-+' '-')"
+# Le tiret DOIT rester en derniere position de l'ensemble : place au milieu
+# ("._-+"), tr le lit comme une plage (_ -> +) et echoue sous glibc/Linux
+# ("range-endpoints ... in reverse collating sequence order"), ce qui cassait
+# le workflow GitHub Actions alors que bsdtr (macOS) l'acceptait.
+SAFE_PROJECT_VERSION="$(printf "%s" "$PROJECT_VERSION" | tr -cs '[:alnum:]._+-' '-')"
 
 # Nom de base des archives : deliberement DECORRELE du nom du dossier courant.
 # En CI (GitHub Actions), le depot est extrait dans un dossier portant le nom du
