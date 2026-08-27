@@ -2,6 +2,7 @@
   "server": {
     "type": "github-releases",
     "repository": "AymericMillot/assistant-ia",
+    "apiBaseUrl": "",
     "latestReleaseUrl": "https://github.com/AymericMillot/assistant-ia/releases/latest",
     "releaseLayout": "github-releases",
     "manifestFileTemplate": "fablab-ai-v{version}.manifest.json",

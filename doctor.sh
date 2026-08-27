@@ -187,6 +187,66 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+say_step "Outils systeme (installation & mises a jour)"
+
+# curl/tar/gzip : telechargement et extraction des packages. rsync : synchro
+# atomique de l'arborescence par ./update.sh (apply distant) et ./install.sh
+# --vX.XXX. rsync est ABSENT des images cloud Debian/Ubuntu minimales et
+# d'Alpine : sans lui, une mise a jour distante echoue apres le telechargement.
+UPDATE_TOOLS_OK=1
+for host_tool in curl tar gzip; do
+  if command -v "$host_tool" >/dev/null 2>&1; then
+    say_ok "'${host_tool}' est disponible."
+  else
+    UPDATE_TOOLS_OK=0
+    say_fail "'${host_tool}' est introuvable : ./install.sh et ./update.sh en ont besoin."
+  fi
+done
+if command -v rsync >/dev/null 2>&1; then
+  say_ok "'rsync' est disponible (synchronisation des mises a jour)."
+else
+  say_warn "'rsync' est introuvable : l'installation base fonctionne, mais ./update.sh (mise a jour distante) et ./install.sh --vX.XXX echoueront."
+  if command -v apt-get >/dev/null 2>&1; then
+    if confirm "Installer rsync maintenant (sudo apt-get install -y rsync) ?"; then
+      if sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y rsync >/dev/null 2>&1; then
+        undo_last_warn
+        say_fixed "rsync installe."
+      else
+        say_warn "Installation automatique de rsync impossible : installez-le manuellement."
+      fi
+    fi
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "  -> sudo dnf install -y rsync"
+  elif command -v apk >/dev/null 2>&1; then
+    echo "  -> sudo apk add rsync"
+  fi
+fi
+
+# Fichiers du projet appartenant a root (Linux) : symptome d'une mise a jour
+# lancee depuis l'interface web (le conteneur updater ecrit dans l'arborescence
+# en tant que root). Les commandes git / ./update.sh de l'utilisateur echouent
+# ensuite silencieusement.
+if [[ "$(uname -s)" == "Linux" && -d "$ROOT_DIR/.git" ]]; then
+  tree_owner_uid="$(stat -c '%u' "$ROOT_DIR" 2>/dev/null || echo 0)"
+  root_owned_count="$(find "$ROOT_DIR" -not -path "$ROOT_DIR/backend/data/*" \
+    -not -path "$ROOT_DIR/backend/uploads/*" -not -path "$ROOT_DIR/.update-backups/*" \
+    -uid 0 -print 2>/dev/null | head -n 20 | wc -l | tr -d ' ')"
+  if [[ "$tree_owner_uid" != "0" && "${root_owned_count:-0}" -gt 0 ]]; then
+    say_warn "Des fichiers du projet appartiennent a root (mise a jour lancee depuis l'interface web ?) : git et ./update.sh peuvent echouer."
+    current_user_uid="$(id -u)"
+    current_user_gid="$(id -g)"
+    if confirm "Rendre l'arborescence a l'utilisateur courant (sudo chown -R ${current_user_uid}:${current_user_gid} sur les fichiers de code) ?"; then
+      if sudo chown -R "${current_user_uid}:${current_user_gid}" "$ROOT_DIR" 2>/dev/null; then
+        undo_last_warn
+        say_fixed "Proprietaire de l'arborescence retabli."
+      else
+        say_warn "chown impossible : corrigez manuellement (sudo chown -R \$USER:\$USER $ROOT_DIR)."
+      fi
+    fi
+  fi
+fi
+
 DOCKER_READY=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   DOCKER_READY=1
@@ -577,14 +637,46 @@ else
   update_base_url="$(grep -o '"baseUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
   if [[ "$update_type" == "github-releases" ]]; then
     update_repository="$(grep -o '"repository"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
-    update_latest_url="$(grep -o '"latestReleaseUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
-    update_latest_url="${update_latest_url:-https://github.com/${update_repository}/releases/latest}"
+    update_api_base="$(grep -o '"apiBaseUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$update_config_file" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    update_api_base="${update_api_base:-https://api.github.com}"
+    update_api_base="${update_api_base%/}"
     if [[ ! "$update_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-      say_fail "Le depot GitHub configure pour les mises a jour est invalide."
-    elif curl -fsSL --max-time 8 -o /dev/null "$update_latest_url" 2>/dev/null; then
-      say_ok "GitHub Releases est joignable (${update_repository})."
+      say_fail "update.config.json : le champ 'repository' est absent ou invalide (attendu : proprietaire/depot)."
     else
-      say_warn "GitHub Releases est indisponible ou aucune release publiee n'est accessible (${update_repository})."
+      # Interroge l'API exactement comme le service updater. Le code HTTP
+      # distingue depot introuvable/prive (404) de "joignable mais vide".
+      releases_body_file="$(mktemp)"
+      releases_http="$(curl -s -o "$releases_body_file" -w '%{http_code}' --max-time 10 \
+        -H 'Accept: application/vnd.github+json' \
+        "${update_api_base}/repos/${update_repository}/releases?per_page=100" 2>/dev/null || echo "000")"
+      case "$releases_http" in
+        200)
+          releases_total="$(grep -o '"tag_name"' "$releases_body_file" 2>/dev/null | wc -l | tr -d ' ')"
+          if [[ "${releases_total:-0}" -gt 0 ]]; then
+            say_ok "Canal de mise a jour operationnel : ${update_repository} (${releases_total} release(s) publiee(s))."
+          else
+            say_warn "Depot ${update_repository} accessible mais AUCUNE release publiee : ./update.sh ne pourra rien recuperer tant qu'une release n'est pas creee (voir docs/GITHUB_RELEASES.md)."
+          fi
+          ;;
+        404)
+          say_fail "Depot de mise a jour introuvable : ${update_repository} (404). Les mises a jour distantes ne fonctionneront pas."
+          echo "  -> Le depot doit exister, etre PUBLIC et porter ce nom exact. Corrigez le nom sur GitHub (gh repo rename) ou le champ 'repository' de update.config.json."
+          ;;
+        403)
+          if grep -qi 'rate limit' "$releases_body_file" 2>/dev/null; then
+            say_warn "Quota API GitHub atteint pour cette adresse IP (403). Reessayez plus tard ; la verification reprendra automatiquement."
+          else
+            say_warn "Acces refuse par l'API GitHub (403) pour ${update_repository} : depot prive ? Rendez-le public."
+          fi
+          ;;
+        000)
+          say_warn "API GitHub injoignable (reseau/proxy) : ./update.sh se rabattra sur une reconstruction locale."
+          ;;
+        *)
+          say_warn "Reponse inattendue de l'API GitHub (HTTP ${releases_http}) pour ${update_repository}."
+          ;;
+      esac
+      rm -f "$releases_body_file"
     fi
   elif curl -sf --max-time 5 -o /dev/null "$update_base_url" 2>/dev/null || curl -sf --max-time 5 -o /dev/null "${update_base_url%/}/version.json" 2>/dev/null; then
     say_ok "Serveur de mise a jour distant joignable (${update_base_url})."

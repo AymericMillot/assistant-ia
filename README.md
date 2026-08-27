@@ -113,35 +113,34 @@ Les dossiers importants sont :
 
 Si tu veux la methode la plus simple, utilise `install.sh`.
 
-### Windows, en une commande
-
-Depuis un terminal PowerShell, sans avoir a cloner le depot au prealable :
-
-```powershell
-irm https://maj.aymericmillot.com/iutlab/web-install.ps1 | iex
-```
-
-Cette commande telecharge le projet dans `%USERPROFILE%\fablab-ai`, l'extrait, puis lance
-l'installation. Comme elle s'execute par evaluation de chaine (`iex`), elle n'est jamais bloquee
-par la politique d'execution de scripts de Windows.
-
-Depuis le dossier du projet :
+### Linux / macOS, depuis GitHub
 
 ```bash
-cd "/chemin/vers/fablab-ai"
-chmod +x install.sh
-chmod +x update.sh
-chmod +x restart.sh
-chmod +x stop.sh
+sudo apt-get update && sudo apt-get install -y git rsync   # rsync : requis par update.sh
+git clone https://github.com/AymericMillot/assistant-ia.git
+cd assistant-ia
+chmod +x *.sh
 ./install.sh
 ```
 
-Une fois le depot publie, la meme installation est possible en une commande depuis un dossier
-vide (remplacer `<url-du-depot>` par l'URL git de votre fork) :
+`rsync` est **absent des images cloud Debian/Ubuntu minimales et d'Alpine** : sans lui,
+l'installation de base fonctionne mais `./update.sh` échoue. `./doctor.sh --check-only` vérifie
+ce prérequis. Détails et méthode par archive `wget` : [docs/INSTALL.md](docs/INSTALL.md).
+
+Depuis un dossier déjà présent (archive extraite, copie manuelle) :
 
 ```bash
-git clone <url-du-depot> fablab-ai && cd fablab-ai && ./install.sh
+cd "/chemin/vers/assistant-ia"
+chmod +x *.sh
+./install.sh
 ```
+
+### Windows
+
+> ⚠️ Le bootstrap `irm https://maj.aymericmillot.com/iutlab/web-install.ps1 | iex` dépend d'un
+> serveur de distribution séparé (non couvert par ce dépôt) et d'un `install.ps1` qui n'est pas
+> encore fourni ici. Sous Windows, installez plutôt depuis WSL2 en suivant la procédure
+> Linux ci-dessus.
 
 En environnement sans terminal interactif (CI, provisionnement automatise) :
 
@@ -223,15 +222,23 @@ appliquer automatiquement les réparations sûres sur un serveur sans terminal.
 
 Ce script :
 
-- verifie d'abord s'il existe une mise a jour distante
-- l'applique si elle existe
+- verifie d'abord s'il existe une mise a jour distante (GitHub Releases du depot defini dans
+  `update.config.json`)
+- l'applique si elle existe (verification SHA-256 ; `.env`, `backend/data`, `backend/uploads`,
+  `backend/logs` preserves)
 - sinon, reconstruit simplement le projet avec les fichiers locaux actuels
 
-Tu peux aussi seulement verifier s'il y a une mise a jour :
+Necessite `rsync`, `curl` et `tar` sur l'hote. Voir [docs/GITHUB_RELEASES.md](docs/GITHUB_RELEASES.md).
+
+Tu peux aussi seulement verifier l'etat du canal distant :
 
 ```bash
 ./update.sh --check-only
 ```
+
+Cette commande sort avec un **code d'erreur** si la verification distante a echoue (depot
+introuvable/prive, quota API GitHub, reseau) — a distinguer de « aucune mise a jour disponible ».
+`./doctor.sh --check-only` detaille la cause.
 
 ### 4. Exporter le projet pour une autre machine
 

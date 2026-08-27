@@ -39,7 +39,10 @@ TAG="v$VERSION"
 echo "==> Construction des archives $VERSION"
 "$ROOT_DIR/export.sh" >/dev/null
 
-ARCHIVE="$ROOT_DIR/export/$VERSION/fablab-ai-v$VERSION.tar.gz"
+# Doit rester aligne avec PACKAGE_BASENAME de export.sh et packageFileTemplate
+# de update.config.json.
+PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-fablab-ai}"
+ARCHIVE="$ROOT_DIR/export/$VERSION/${PACKAGE_BASENAME}-v$VERSION.tar.gz"
 if [[ ! -f "$ARCHIVE" ]]; then
   echo "Archive attendue introuvable : $ARCHIVE" >&2
   exit 1

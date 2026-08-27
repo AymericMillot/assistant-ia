@@ -2,18 +2,63 @@
 
 ## Prérequis
 
-- **Docker** + **Docker Compose** (`docker --version`, `docker compose version`).
+- **Docker** + **Docker Compose v2** (`docker --version`, `docker compose version`).
+- **`git`, `curl`, `tar`, `gzip`** — présents par défaut sur la plupart des systèmes.
+- **`rsync`** — requis par `./update.sh` (mise à jour distante) et par `./install.sh --vX.XXX`
+  (installation d'une version précise). **Absent des images cloud Debian/Ubuntu minimales et
+  d'Alpine** : installez-le explicitement (`sudo apt-get install -y rsync`). L'installation de
+  base fonctionne sans, mais les mises à jour non.
 - Une connexion internet au premier démarrage (téléchargement des images Docker et des modèles
   Ollama).
 - Machine recommandée : 16 Go de RAM ou plus, processeur récent, espace disque suffisant pour les
   modèles Ollama et les documents indexés (compter plusieurs Go par modèle).
+
+`./doctor.sh --check-only` vérifie tous ces prérequis (dont `rsync` et l'accès au dépôt de
+mises à jour) sans rien modifier.
+
+## Récupérer le projet sur une machine Linux
+
+Le projet **n'a pas d'installateur `curl | bash`** : il faut d'abord poser les fichiers, puis
+lancer `./install.sh`.
+
+### Option A — `git clone` (recommandé)
+
+`./update.sh` conserve le dossier `.git` : cloner permet aussi de suivre les correctifs avec
+`git pull`.
+
+```bash
+sudo apt-get update && sudo apt-get install -y git rsync
+git clone https://github.com/AymericMillot/assistant-ia.git
+cd assistant-ia
+chmod +x *.sh
+./install.sh                 # ou ./install.sh --non-interactive
+```
+
+### Option B — archive d'une release (`wget`)
+
+Les archives de release portent la version dans leur nom (`fablab-ai-v<version>.tar.gz`) : il
+n'existe **pas** d'URL « latest » stable pour `wget`. Récupérez d'abord le numéro de version,
+puis l'archive correspondante :
+
+```bash
+sudo apt-get update && sudo apt-get install -y curl tar rsync
+repo=AymericMillot/assistant-ia
+ver=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | sed 's/.*"v\{0,1\}\([^"]*\)"$/\1/')
+wget "https://github.com/$repo/releases/download/v$ver/fablab-ai-v$ver.tar.gz"
+tar -xzf "fablab-ai-v$ver.tar.gz"
+cd fablab-ai
+chmod +x *.sh
+./install.sh --non-interactive
+```
+
+L'archive ne contient ni `.env`, ni `backend/data`, ni les `node_modules` : `install.sh` génère
+le `.env` et les secrets au premier lancement.
 
 ## Installation en une commande
 
 Depuis le dossier du projet :
 
 ```bash
-cd chemin/vers/fablab-ai
 chmod +x install.sh doctor.sh update.sh restart.sh stop.sh
 ./install.sh
 ```
@@ -87,6 +132,27 @@ interventions non interactives car il accepte les corrections proposées.
 | Port `3000` déjà utilisé | Un autre service occupe le port | Changer `PORT` dans `.env` puis relancer `docker compose up -d` |
 | Ollama ne répond pas après l'installation | Modèle encore en cours de téléchargement | Vérifier `docker compose logs -f ollama` |
 | Page admin bloquée en local uniquement | `ADMIN_ACCESS_MODE=local` actif alors qu'on accède depuis un autre poste | Repasser à `ADMIN_ACCESS_MODE=any` si l'accès distant est voulu |
+| `rsync: command not found` pendant `./update.sh` | `rsync` absent (image Linux minimale) | `sudo apt-get install -y rsync` puis relancer |
+| `./update.sh` dit « à jour » alors qu'une release existe | Canal de mise à jour cassé (dépôt renommé/privé, quota API) | `./update.sh --check-only` (sort en erreur si la vérification a échoué) puis `./doctor.sh --check-only` |
+| Après une mise à jour via l'interface web, `git`/`./update.sh` échouent | Fichiers du projet devenus la propriété de `root` | `sudo chown -R $USER:$USER .` (ou laisser `./doctor.sh` le proposer) |
+
+## Mettre à jour
+
+```bash
+./update.sh --check-only   # état du canal distant ; code de sortie ≠ 0 si la vérification échoue
+./update.sh                # applique la mise à jour distante, ou reconstruit localement à défaut
+```
+
+Le mécanisme complet (GitHub Releases, manifest SHA-256, `preservePaths`) est décrit dans
+[GITHUB_RELEASES.md](GITHUB_RELEASES.md). Points clés :
+
+- le dépôt de `update.config.json` (`repository`) doit **exister, être public et porter ce nom
+  exact** ; sinon chaque vérification renvoie `404` et `./update.sh` se rabat sur une
+  reconstruction locale ;
+- `.env`, `backend/data`, `backend/uploads`, `backend/logs` sont toujours préservés ;
+- l'API GitHub non authentifiée est limitée à ~60 requêtes/heure et par IP : derrière un NAT
+  partagé, la vérification peut être temporairement refusée (`403`), sans conséquence — elle
+  reprend d'elle-même.
 
 ## Déploiement sur un serveur distant
 

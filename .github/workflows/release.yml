@@ -8,6 +8,14 @@ on:
 permissions:
   contents: write
 
+env:
+  # Nom de base des archives de release. Doit rester aligne avec
+  # PACKAGE_BASENAME de export.sh et packageFileTemplate/manifestFileTemplate
+  # de update.config.json. Indispensable ici : le depot est extrait par
+  # actions/checkout dans un dossier portant le nom du depot, donc sans cette
+  # variable export.sh nommerait l'archive d'apres ce nom.
+  UPDATE_PROJECT_NAME: fablab-ai
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -32,10 +40,12 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           folder="export/$version"
-          archive="fablab-ai-v$version.tar.gz"
+          base="${UPDATE_PROJECT_NAME}-v$version"
+          archive="$base.tar.gz"
+          test -f "$folder/$archive" || { echo "Archive introuvable : $folder/$archive" >&2; ls -la "$folder" >&2; exit 1; }
           sha256="$(sha256sum "$folder/$archive" | awk '{print $1}')"
-          node -e "const fs=require('fs'); const version=process.argv[1]; const sha256=process.argv[2]; const archive=process.argv[3]; fs.writeFileSync(process.argv[4], JSON.stringify({version,sha256,packageFile:archive,publishedAt:new Date().toISOString()},null,2)+'\\n')" "$version" "$sha256" "$archive" "$folder/fablab-ai-v$version.manifest.json"
-          cp release-notes.txt "$folder/fablab-ai-v$version.notes.md"
+          node -e "const fs=require('fs'); const [version,sha256,archive,out]=process.argv.slice(1); fs.writeFileSync(out, JSON.stringify({version,sha256,packageFile:archive,publishedAt:new Date().toISOString()},null,2)+'\\n')" "$version" "$sha256" "$archive" "$folder/$base.manifest.json"
+          cp release-notes.txt "$folder/$base.notes.md"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,9 +54,10 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           folder="export/$version"
+          base="${UPDATE_PROJECT_NAME}-v$version"
           gh release create "v$version" \
-            "$folder/fablab-ai-v$version.tar.gz#FablabAI $version (Linux)" \
-            "$folder/fablab-ai-v$version.zip#FablabAI $version (ZIP)" \
-            "$folder/fablab-ai-v$version.manifest.json#Manifest de vérification" \
-            "$folder/fablab-ai-v$version.notes.md#Notes de version" \
+            "$folder/$base.tar.gz#FablabAI $version (Linux)" \
+            "$folder/$base.zip#FablabAI $version (ZIP)" \
+            "$folder/$base.manifest.json#Manifest de vérification" \
+            "$folder/$base.notes.md#Notes de version" \
             --title "FablabAI $version" --notes-file release-notes.txt

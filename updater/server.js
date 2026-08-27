@@ -342,6 +342,13 @@ async function fetchGithubReleases(serverConfig, headers = {}) {
         if (!manifest || String(manifest.version || "") !== version) {
           return null;
         }
+        // Le SHA-256 est le seul rempart contre une archive alteree : un manifest
+        // dont l'empreinte n'a pas le format attendu (64 hex) est traite comme
+        // une release incomplete et ignore, plutot que propage jusqu'a l'application.
+        const manifestSha = String(manifest.sha256 || "").toLowerCase();
+        if (!/^[a-f0-9]{64}$/.test(manifestSha)) {
+          return null;
+        }
         const packageName = String(manifest.packageFile || resolvePackageFileName(serverConfig, version));
         const packageAsset = findGithubAsset(release.assets, packageName);
         if (!packageAsset?.browser_download_url) {
@@ -357,7 +364,7 @@ async function fetchGithubReleases(serverConfig, headers = {}) {
           notes,
           notesUrl: notesAsset?.browser_download_url || release.html_url || "",
           releaseUrl: release.html_url || String(serverConfig?.latestReleaseUrl || ""),
-          sha256: String(manifest.sha256 || "").toLowerCase(),
+          sha256: manifestSha,
           publishedAt: release.published_at || manifest.publishedAt || ""
         };
       })

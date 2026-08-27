@@ -125,6 +125,27 @@ install_requested_version() {
     return 0
   fi
 
+  # tar/curl/rsync sont indispensables pour recuperer et deployer un package
+  # distant. rsync notamment est absent des images cloud Debian/Ubuntu minimales
+  # et d'Alpine : sans ce controle l'echec surviendrait apres le telechargement,
+  # avec un message obscur ("rsync: command not found").
+  local missing_tools=()
+  local required_tool
+  for required_tool in curl tar rsync; do
+    command -v "$required_tool" >/dev/null 2>&1 || missing_tools+=("$required_tool")
+  done
+  if [[ ${#missing_tools[@]} -gt 0 ]]; then
+    echo "Outils systeme manquants pour installer une version distante : ${missing_tools[*]}" >&2
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "  -> sudo apt-get update && sudo apt-get install -y ${missing_tools[*]}" >&2
+    elif command -v dnf >/dev/null 2>&1; then
+      echo "  -> sudo dnf install -y ${missing_tools[*]}" >&2
+    elif command -v apk >/dev/null 2>&1; then
+      echo "  -> sudo apk add ${missing_tools[*]}" >&2
+    fi
+    exit 1
+  fi
+
   echo "==> Recuperation de la version ${version} depuis le serveur de mise a jour..." >&2
 
   local update_config_file="$ROOT_DIR/update.config.json"

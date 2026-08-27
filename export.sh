@@ -58,8 +58,16 @@ read_project_version() {
 
 PROJECT_VERSION="$(read_project_version)"
 SAFE_PROJECT_VERSION="$(printf "%s" "$PROJECT_VERSION" | tr -cs '[:alnum:]._-+' '-')"
-ARCHIVE_NAME="${PROJECT_NAME}-v${SAFE_PROJECT_VERSION}.tar.gz"
-ZIP_ARCHIVE_NAME="${PROJECT_NAME}-v${SAFE_PROJECT_VERSION}.zip"
+
+# Nom de base des archives : deliberement DECORRELE du nom du dossier courant.
+# En CI (GitHub Actions), le depot est extrait dans un dossier portant le nom du
+# depot (ex: "assistant-ia") ; sans cette variable, export.sh produirait
+# "assistant-ia-v1.059.tar.gz" alors que update.config.json et le workflow
+# attendent "fablab-ai-v1.059.tar.gz". La valeur doit rester alignee avec
+# packageFileTemplate/manifestFileTemplate de update.config.json.
+PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-fablab-ai}"
+ARCHIVE_NAME="${PACKAGE_BASENAME}-v${SAFE_PROJECT_VERSION}.tar.gz"
+ZIP_ARCHIVE_NAME="${PACKAGE_BASENAME}-v${SAFE_PROJECT_VERSION}.zip"
 VERSION_OUTPUT_DIR=""
 RELEASE_DATETIME="$(TZ="Europe/Paris" date '+%d/%m/%Y %H:%M:%S')"
 
@@ -142,6 +150,7 @@ cat > "$TEMP_EXCLUDES_FILE" <<'EOF'
 ._*
 export
 release
+.update-backups
 backend/node_modules
 frontend/node_modules
 updater/node_modules

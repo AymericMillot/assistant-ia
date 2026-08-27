@@ -65,6 +65,8 @@ apply_remote_package_from_host() {
   local -a preserve_paths
   local preserve_path
 
+  require_host_update_tools
+
   temp_root="$(mktemp -d)"
   archive_path="$temp_root/release.tar.gz"
   extract_root="$temp_root/extract"
@@ -217,16 +219,40 @@ echo "Version actuelle : ${current_version:-inconnue}"
 if [[ -n "${latest_version:-}" ]]; then
   echo "Version distante : ${latest_version}"
 fi
+
+# Le champ "warning" n'est renseigne par l'updater QUE lorsque l'interrogation du
+# canal de mise a jour a echoue (depot GitHub introuvable/prive, quota API
+# atteint, reseau coupe, aucune release verifiable...). Il faut alors distinguer
+# ce cas de "aucune mise a jour disponible" : sinon un canal casse passe pour un
+# systeme a jour et l'operateur ne s'apercoit de rien.
+CHECK_FAILED=0
 if [[ -n "${warning_message:-}" ]]; then
-  echo "Information : ${warning_message}"
+  CHECK_FAILED=1
+  echo "ATTENTION : la verification distante a echoue : ${warning_message}" >&2
+  echo "  -> Verifiez update.config.json (repository), l'acces reseau au depot GitHub" >&2
+  echo "     et qu'une release publique existe. Diagnostic : ./doctor.sh --check-only" >&2
 fi
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  if [[ "$CHECK_FAILED" -eq 1 ]]; then
+    echo "Etat de la mise a jour distante : INDETERMINE (verification impossible)."
+    exit 1
+  fi
   if [[ "$update_available" == "true" ]]; then
     echo "Une mise à jour distante est disponible."
   else
-    echo "Aucune mise à jour distante disponible."
+    echo "Aucune mise à jour distante disponible (systeme a jour)."
   fi
+  exit 0
+fi
+
+if [[ "$CHECK_FAILED" -eq 1 ]]; then
+  echo "Le canal de mise a jour distant est injoignable : reconstruction locale du projet"
+  echo "avec les fichiers actuels (aucune nouvelle version ne sera recuperee)."
+  stop_indexing_if_possible
+  docker_compose_up_build
+  wait_for_backend_ready
+  print_access_summary "Reconstruction locale terminee (canal distant injoignable)."
   exit 0
 fi
 

@@ -87,18 +87,32 @@ async function main() {
       throw new Error("Le dépôt GitHub de mise à jour est invalide.");
     }
 
-    const response = await fetch(`https://api.github.com/repos/${repository}/releases/latest`, {
+    // Meme source que le service reel (updater/server.js) : liste complete des
+    // releases + tri par version, et non /releases/latest (qui suit la date de
+    // publication et peut pointer une release sans manifest). apiBaseUrl permet
+    // de tester contre un miroir ou un mock local.
+    const apiBaseUrl = String(server.apiBaseUrl || "https://api.github.com").replace(/\/+$/, "");
+    const response = await fetch(`${apiBaseUrl}/repos/${repository}/releases?per_page=100`, {
       headers: { Accept: "application/vnd.github+json" }
     });
     if (!response.ok) {
-      throw new Error(`Impossible de récupérer la dernière release GitHub (${response.status}).`);
+      throw new Error(`Impossible de récupérer les releases GitHub (${response.status}).`);
     }
 
-    const release = await response.json();
-    const version = String(release.tag_name || "").replace(/^v/i, "");
-    if (!isVersionFolderName(version)) {
-      throw new Error("Le tag de la dernière release GitHub est invalide.");
+    const releasesPayload = await response.json();
+    const release = (Array.isArray(releasesPayload) ? releasesPayload : [])
+      .filter((entry) => entry && !entry.draft && !entry.prerelease)
+      .filter((entry) => isVersionFolderName(String(entry.tag_name || "").replace(/^v/i, "")))
+      .sort((left, right) =>
+        compareVersions(
+          String(right.tag_name || "").replace(/^v/i, ""),
+          String(left.tag_name || "").replace(/^v/i, "")
+        )
+      )[0];
+    if (!release) {
+      throw new Error("Aucune release GitHub exploitable (tag vX.Y, ni brouillon ni prérelease).");
     }
+    const version = String(release.tag_name || "").replace(/^v/i, "");
     const manifestName = String(server.manifestFileTemplate || "fablab-ai-v{version}.manifest.json").replace(
       /\{version\}/g,
       version
