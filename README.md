@@ -127,6 +127,30 @@ chmod +x *.sh
 l'installation de base fonctionne mais `./update.sh` échoue. `./doctor.sh --check-only` vérifie
 ce prérequis. Détails et méthode par archive `wget` : [docs/INSTALL.md](docs/INSTALL.md).
 
+### Linux, installer la dernière version depuis les Releases GitHub
+
+Page de la dernière version : <https://github.com/AymericMillot/assistant-ia/releases/latest>
+
+Chaque release attache `assistant-ia-vX.X.X.tar.gz` et écrit son SHA-256 dans la description.
+Pour installer sur un serveur Linux sans cloner le dépôt (remplacer `vX.X.X` par la version
+affichée sur la page ci-dessus) :
+
+```bash
+VERSION=v1.1.0
+curl -fL -o assistant-ia-$VERSION.tar.gz \
+  https://github.com/AymericMillot/assistant-ia/releases/download/$VERSION/assistant-ia-$VERSION.tar.gz
+# vérifier l'intégrité avec le SHA-256 publié dans la description de la release :
+# echo "<sha256 de la release>  assistant-ia-$VERSION.tar.gz" | sha256sum -c
+tar xzf assistant-ia-$VERSION.tar.gz
+cd assistant-ia-$VERSION
+chmod +x *.sh
+./install.sh
+```
+
+Sur une instance **déjà installée**, ne pas repartir de l'archive : lancer `./update.sh` dans le
+dossier existant (ou le bouton « Mise à jour » de l'admin), ce qui préserve `.env`, la base et
+les documents.
+
 Depuis un dossier déjà présent (archive extraite, copie manuelle) :
 
 ```bash
