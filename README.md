@@ -161,10 +161,8 @@ chmod +x *.sh
 
 ### Windows
 
-> ⚠️ Le bootstrap `irm https://maj.aymericmillot.com/iutlab/web-install.ps1 | iex` dépend d'un
-> serveur de distribution séparé (non couvert par ce dépôt) et d'un `install.ps1` qui n'est pas
-> encore fourni ici. Sous Windows, installez plutôt depuis WSL2 en suivant la procédure
-> Linux ci-dessus.
+> ⚠️ Il n'y a pas d'installeur PowerShell natif dans ce dépôt. Sous Windows, installez depuis
+> WSL2 en suivant la procédure Linux ci-dessus.
 
 En environnement sans terminal interactif (CI, provisionnement automatise) :
 
