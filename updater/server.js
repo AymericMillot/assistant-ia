@@ -61,9 +61,8 @@ const remoteFetchTimeoutMs = Math.max(1000, Number(process.env.UPDATE_REMOTE_TIM
 const remoteReleaseTtlMs = Math.max(10000, Number(process.env.UPDATE_RELEASE_CACHE_TTL_MS || 5 * 60 * 1000));
 
 let hostWorkspaceDirPromise = null;
-// Cache par canal ("stable" / "beta") : eviter qu'une consultation beta ne
-// masque temporairement une release stable plus recente (et inversement).
-const remoteReleaseCache = new Map();
+let remoteReleaseCache = null;
+let remoteReleaseCachedAt = 0;
 
 const state = {
   busy: false,
@@ -180,47 +179,27 @@ async function getHostWorkspaceDir() {
   return hostWorkspaceDirPromise;
 }
 
-// Coeur numerique classique ("1.0.5") avec un identifiant beta optionnel
-// ("1.0.5-beta.3") : une version beta se compare comme anterieure a la
-// version stable de meme coeur, et se classe par numero entre elles.
 function normalizeVersion(version) {
-  const raw = String(version || "0").trim();
-  const [core, betaSuffix] = raw.split("-beta.");
-  const numericParts = core.split(".").map((part) => Number(part) || 0);
-  const betaNumber = betaSuffix !== undefined ? Number(betaSuffix) || 0 : null;
-  return { numericParts, betaNumber };
+  return String(version || "0")
+    .trim()
+    .split(".")
+    .map((part) => Number(part) || 0);
 }
 
 function compareVersions(left, right) {
   const a = normalizeVersion(left);
   const b = normalizeVersion(right);
-  const maxLength = Math.max(a.numericParts.length, b.numericParts.length);
+  const maxLength = Math.max(a.length, b.length);
 
   for (let index = 0; index < maxLength; index += 1) {
-    const leftValue = a.numericParts[index] || 0;
-    const rightValue = b.numericParts[index] || 0;
+    const leftValue = a[index] || 0;
+    const rightValue = b[index] || 0;
     if (leftValue > rightValue) {
       return 1;
     }
     if (leftValue < rightValue) {
       return -1;
     }
-  }
-
-  if (a.betaNumber === null && b.betaNumber === null) {
-    return 0;
-  }
-  if (a.betaNumber === null) {
-    return 1;
-  }
-  if (b.betaNumber === null) {
-    return -1;
-  }
-  if (a.betaNumber > b.betaNumber) {
-    return 1;
-  }
-  if (a.betaNumber < b.betaNumber) {
-    return -1;
   }
 
   return 0;
@@ -354,7 +333,7 @@ async function resolveReleaseFromDirectory(baseUrl, versionFolder, serverConfig,
 }
 
 function isVersionFolderName(value) {
-  return /^\d+(?:\.\d+)*(?:-beta\.\d+)?$/.test(String(value || "").trim());
+  return /^\d+(?:\.\d+)*$/.test(String(value || "").trim());
 }
 
 function resolvePackageFileName(serverConfig, version) {
@@ -379,7 +358,7 @@ function findGithubAsset(assets, expectedName) {
   return (Array.isArray(assets) ? assets : []).find((asset) => asset?.name === expectedName) || null;
 }
 
-async function fetchGithubReleases(serverConfig, headers = {}, { includeBeta = false } = {}) {
+async function fetchGithubReleases(serverConfig, headers = {}) {
   const repository = String(serverConfig?.repository || "").trim();
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
     throw new Error("Le dépôt GitHub de mise à jour est invalide.");
@@ -413,7 +392,7 @@ async function fetchGithubReleases(serverConfig, headers = {}, { includeBeta = f
   const payload = await response.json();
   const releases = await Promise.all(
     (Array.isArray(payload) ? payload : [])
-      .filter((release) => !release?.draft && (includeBeta || !release?.prerelease))
+      .filter((release) => !release?.draft && !release?.prerelease)
       .map(async (release) => {
         const version = normalizeGithubReleaseVersion(release.tag_name);
         if (!isVersionFolderName(version)) {
@@ -462,8 +441,7 @@ async function fetchGithubReleases(serverConfig, headers = {}, { includeBeta = f
     throw new Error("Aucune release GitHub complète et vérifiable n'est disponible.");
   }
   // Trie par version decroissante plutot que de se fier a l'ordre de creation
-  // GitHub, notamment pertinent avec des betas qui peuvent etre publiees hors
-  // sequence chronologique stricte.
+  // GitHub.
   validReleases.sort((left, right) => compareVersions(right.version, left.version));
   return validReleases;
 }
@@ -510,12 +488,12 @@ async function tryFetchJson(url, headers = {}, fallbackValue = null) {
   }
 }
 
-async function fetchRemoteReleases({ includeBeta = false } = {}) {
+async function fetchRemoteReleases() {
   const config = await readUpdateConfig();
   const headers = config.server.headers || {};
   const releaseLayout = String(config.server.releaseLayout || "").trim().toLowerCase();
   if (releaseLayout === "github-releases" || config.server.type === "github-releases") {
-    return { releases: await fetchGithubReleases(config.server, headers, { includeBeta }), config };
+    return { releases: await fetchGithubReleases(config.server, headers), config };
   }
   if (!config.server?.baseUrl) {
     throw new Error("Aucune URL de base n'est configurée dans update.config.json.");
@@ -586,8 +564,8 @@ async function fetchRemoteReleases({ includeBeta = false } = {}) {
   };
 }
 
-async function fetchRemoteReleaseInfo({ includeBeta = false } = {}) {
-  const { releases, config } = await fetchRemoteReleases({ includeBeta });
+async function fetchRemoteReleaseInfo() {
+  const { releases, config } = await fetchRemoteReleases();
   const release = releases[0];
 
   if (!release) {
@@ -600,9 +578,9 @@ async function fetchRemoteReleaseInfo({ includeBeta = false } = {}) {
   };
 }
 
-async function fetchRemoteReleaseInfoForVersion(targetVersion, { includeBeta = false } = {}) {
+async function fetchRemoteReleaseInfoForVersion(targetVersion) {
   const normalizedTargetVersion = String(targetVersion || "").trim();
-  const { releases, config } = await fetchRemoteReleases({ includeBeta });
+  const { releases, config } = await fetchRemoteReleases();
 
   if (!normalizedTargetVersion) {
     return {
@@ -1198,24 +1176,24 @@ async function restoreBackupArchive(archivePath, preservePaths = []) {
   }
 }
 
-async function fetchCachedRemoteReleaseInfo({ includeBeta = false } = {}) {
-  const cacheKey = includeBeta ? "beta" : "stable";
+async function fetchCachedRemoteReleaseInfo() {
   const now = Date.now();
-  const cached = remoteReleaseCache.get(cacheKey);
-  if (cached && now - cached.cachedAt < remoteReleaseTtlMs) {
-    return cached.result;
+  if (remoteReleaseCache && now - remoteReleaseCachedAt < remoteReleaseTtlMs) {
+    return remoteReleaseCache;
   }
 
-  const result = await fetchRemoteReleaseInfo({ includeBeta });
-  remoteReleaseCache.set(cacheKey, { result, cachedAt: now });
+  const result = await fetchRemoteReleaseInfo();
+  remoteReleaseCache = result;
+  remoteReleaseCachedAt = now;
   return result;
 }
 
 function invalidateRemoteReleaseCache() {
-  remoteReleaseCache.clear();
+  remoteReleaseCache = null;
+  remoteReleaseCachedAt = 0;
 }
 
-async function buildStatus({ includeBeta = false } = {}) {
+async function buildStatus() {
   const currentVersion = await readVersion();
   setState({ currentVersion });
   await pruneOldBackups();
@@ -1229,7 +1207,7 @@ async function buildStatus({ includeBeta = false } = {}) {
   try {
     const updateConfig = await readUpdateConfig();
     latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
-    const { release } = await fetchCachedRemoteReleaseInfo({ includeBeta });
+    const { release } = await fetchCachedRemoteReleaseInfo();
     const latestVersion = release.version || currentVersion;
     const updateAvailable = compareVersions(latestVersion, currentVersion) === 1;
 
@@ -1284,7 +1262,7 @@ async function buildStatus({ includeBeta = false } = {}) {
   }
 }
 
-async function applyUpdateInBackground(targetVersion = "", { includeBeta = false } = {}) {
+async function applyUpdateInBackground(targetVersion = "") {
   invalidateRemoteReleaseCache();
   setState({
     busy: true,
@@ -1307,9 +1285,7 @@ async function applyUpdateInBackground(targetVersion = "", { includeBeta = false
 
   try {
     const requestedVersion = String(targetVersion || "").trim();
-    const { release, config, releases } = await fetchRemoteReleaseInfoForVersion(requestedVersion, {
-      includeBeta
-    });
+    const { release, config, releases } = await fetchRemoteReleaseInfoForVersion(requestedVersion);
     const currentVersion = await readVersion();
     const targetReleaseVersion = release.version || currentVersion;
     const latestVersion = releases?.[0]?.version || targetReleaseVersion;
@@ -1925,16 +1901,14 @@ app.get("/health", async (_req, res) => {
   });
 });
 
-app.get("/status", async (req, res) => {
-  const includeBeta = String(req.query?.channel || "").trim().toLowerCase() === "beta";
-  const payload = await buildStatus({ includeBeta });
+app.get("/status", async (_req, res) => {
+  const payload = await buildStatus();
   res.json(payload);
 });
 
-app.get("/releases", async (req, res) => {
-  const includeBeta = String(req.query?.channel || "").trim().toLowerCase() === "beta";
+app.get("/releases", async (_req, res) => {
   try {
-    const { releases } = await fetchRemoteReleases({ includeBeta });
+    const { releases } = await fetchRemoteReleases();
     res.json({
       releases,
       latestVersion: releases[0]?.version || null
@@ -1957,9 +1931,8 @@ app.post("/apply", requireSharedToken, async (req, res) => {
   }
 
   const targetVersion = String(req.body?.targetVersion || "").trim();
-  const includeBeta = String(req.body?.channel || "").trim().toLowerCase() === "beta";
 
-  applyUpdateInBackground(targetVersion, { includeBeta }).catch((error) => {
+  applyUpdateInBackground(targetVersion).catch((error) => {
     pushLog(`Erreur inattendue: ${error.message}`);
   });
 

@@ -70,14 +70,7 @@ jobs:
 
           # Assets = uniquement le code source (.tar.gz et .zip).
           # Titre de la release = le tag lui-meme (vX.X.X).
-          # Une version "X.Y.Z-beta.N" est marquee prerelease GitHub : exclue
-          # par defaut du canal stable cote updater (voir includeBeta).
-          prerelease_flag=()
-          if [[ "$version" == *-beta.* ]]; then
-            prerelease_flag=(--prerelease)
-          fi
-
           gh release create "v$version" \
             "$folder/$base.tar.gz#Code source (v$version, .tar.gz)" \
             "$folder/$base.zip#Code source (v$version, .zip)" \
-            --title "v$version" --notes-file "$notes_file" "${prerelease_flag[@]}"
+            --title "v$version" --notes-file "$notes_file"
