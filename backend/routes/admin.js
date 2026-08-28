@@ -1628,6 +1628,31 @@ function ensureAutoUpdateTime(value) {
   return time;
 }
 
+router.get("/update/channel", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
+  res.json({ beta: getSetting("updateChannelBeta", "false") === "true" });
+});
+
+router.put("/update/channel", requireRole(["referent", "administrator", "owner"]), (req, res, next) => {
+  try {
+    const beta = parseOptionalBoolean(req.body?.beta);
+    if (req.body?.beta !== undefined && beta === null) {
+      const error = new Error("Valeur booleenne invalide pour 'beta'.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (beta !== null) {
+      setSetting("updateChannelBeta", beta ? "true" : "false");
+    }
+
+    const payload = { beta: getSetting("updateChannelBeta", "false") === "true" };
+    logAudit(req, "update.channel.update", { details: payload });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/update/schedule", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
   res.json({
     enabled: getSetting("autoUpdateEnabled", "false") === "true",

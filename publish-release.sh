@@ -30,11 +30,16 @@ for arg in "$@"; do
 done
 
 VERSION="$(node -e 'const fs=require("fs"); process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).version||""))' "$VERSION_FILE")"
-if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-beta\.[0-9]+)?$ ]]; then
   echo "Version invalide dans version.json." >&2
   exit 1
 fi
 TAG="v$VERSION"
+# Une version "X.Y.Z-beta.N" est publiee comme prerelease GitHub : exclue par
+# defaut du canal stable (voir isBetaChannelEnabled cote backend et le filtre
+# includeBeta cote updater/server.js).
+IS_BETA=0
+[[ "$VERSION" == *-beta.* ]] && IS_BETA=1
 
 echo "==> Construction des archives $VERSION"
 "$ROOT_DIR/export.sh" >/dev/null
@@ -79,4 +84,8 @@ else
 fi
 
 git -C "$ROOT_DIR" push origin "$TAG"
-echo "==> Tag envoyé. GitHub Actions publiera automatiquement la release $TAG."
+if [[ "$IS_BETA" -eq 1 ]]; then
+  echo "==> Tag envoyé. GitHub Actions publiera automatiquement la release $TAG en tant que prerelease (bêta)."
+else
+  echo "==> Tag envoyé. GitHub Actions publiera automatiquement la release $TAG."
+fi
