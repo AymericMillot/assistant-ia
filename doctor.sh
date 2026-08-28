@@ -710,6 +710,31 @@ else
   echo "  -> Reparation dediee : ./updater.sh"
 fi
 
+# Le conteneur updater embarque son propre CLI Docker (docker.sock monte) pour
+# executer "docker compose ... up --build" lors d'une mise a jour. Un bug
+# corrige en v1.0.2 installait le binaire compose hors des repertoires de
+# plugins CLI Docker : "docker compose" y etait alors introuvable, et toute
+# mise a jour/rollback echouait avec "docker-compose a quitte avec le code
+# 125" (message brut : "unknown shorthand flag: 'p'") apres avoir deja
+# synchronise les nouveaux fichiers sur disque. Detecte les images updater
+# construites avant ce correctif et les reconstruit automatiquement.
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx assistant-ia-updater; then
+  if docker exec assistant-ia-updater docker compose version >/dev/null 2>&1; then
+    say_ok "Le conteneur updater sait invoquer 'docker compose' (mises a jour applicables)."
+  else
+    say_fail "Le conteneur updater ne sait pas invoquer 'docker compose' : toute mise a jour ou rollback echouera (code 125)."
+    echo "  -> Cause connue : image updater construite avant le correctif du plugin CLI (v1.0.2)."
+    if confirm "Reconstruire le conteneur updater maintenant pour corriger ceci ?"; then
+      if docker_compose_up_build updater >/dev/null 2>&1 && docker exec assistant-ia-updater docker compose version >/dev/null 2>&1; then
+        undo_last_fail
+        say_fixed "Conteneur updater reconstruit : 'docker compose' est maintenant disponible."
+      else
+        say_fail "La reconstruction du conteneur updater n'a pas resolu le probleme. Verifiez : docker logs --tail 50 assistant-ia-updater"
+      fi
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 say_step "Modeles Ollama"
 
@@ -762,8 +787,25 @@ else
   # juste apres l'ecriture de version.json.
   if [[ "$image_epoch" -gt 0 && "$version_epoch" -gt 0 && $((version_epoch - image_epoch)) -gt 120 ]]; then
     say_fail "version.json (${disk_version:-?}) est plus recent que l'image backend : une mise a jour a ete appliquee sur disque sans reconstruction des conteneurs."
-    echo "  -> Terminez la mise a jour : ./update.sh   (elle reconstruira le backend avec les fichiers actuels)"
-    echo "  -> Ou revenez en arriere depuis l'onglet Mises a jour de l'administration."
+    if confirm "Reconstruire le backend maintenant avec les fichiers deja synchronises (docker compose up -d --build backend) ?"; then
+      if docker_compose_up_build backend >/dev/null 2>&1; then
+        new_backend_image="$(docker inspect --format '{{.Image}}' assistant-ia-backend 2>/dev/null || true)"
+        new_image_created_iso="$(docker image inspect "$new_backend_image" --format '{{.Created}}' 2>/dev/null || true)"
+        new_image_epoch="$(date -d "$new_image_created_iso" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${new_image_created_iso%%.*}" +%s 2>/dev/null || echo 0)"
+        if [[ "$new_image_epoch" -gt 0 && $((version_epoch - new_image_epoch)) -le 120 ]]; then
+          undo_last_fail
+          say_fixed "Backend reconstruit : l'image correspond maintenant a version.json (${disk_version:-?})."
+        else
+          say_fail "Le backend a ete reconstruit mais l'ecart persiste. Verifiez : docker logs --tail 50 assistant-ia-backend"
+        fi
+      else
+        say_fail "La reconstruction du backend a echoue. Verifiez l'espace disque et : docker logs --tail 50 assistant-ia-backend"
+        echo "  -> Ou revenez en arriere depuis l'onglet Mises a jour de l'administration."
+      fi
+    else
+      echo "  -> Terminez la mise a jour : ./update.sh   (elle reconstruira le backend avec les fichiers actuels)"
+      echo "  -> Ou revenez en arriere depuis l'onglet Mises a jour de l'administration."
+    fi
   else
     say_ok "L'image backend correspond a la version presente sur disque (${disk_version:-inconnue})."
   fi
@@ -841,6 +883,13 @@ else
         403)
           if grep -qi 'rate limit' "$releases_body_file" 2>/dev/null; then
             say_warn "Quota API GitHub atteint pour cette adresse IP (403). Reessayez plus tard ; la verification reprendra automatiquement."
+            # Le cache updater (5 min) et le polling admin limitent deja les
+            # appels, mais une IP partagee (plusieurs installations, NAT
+            # d'etablissement) peut encore epuiser les 60 req/h non
+            # authentifiees. Un jeton GitHub porte la limite a 5000 req/h.
+            if [[ -z "$(get_env_value "UPDATE_GITHUB_TOKEN")" ]]; then
+              echo "  -> Pour eviter que ca se reproduise : ajoutez UPDATE_GITHUB_TOKEN=<jeton GitHub> dans .env puis ./restart.sh (limite 5000 req/h au lieu de 60)."
+            fi
           else
             say_warn "Acces refuse par l'API GitHub (403) pour ${update_repository} : depot prive ? Rendez-le public."
           fi
