@@ -495,12 +495,14 @@
         <table class="scripts">
           <thead><tr><th>Commande</th><th>Rôle</th></tr></thead>
           <tbody>
-            <tr><td><code>./install.sh</code></td><td>Première installation complète (Docker, modèles, services). <code>./install.sh --v1.000</code> installe une version précise récupérée depuis le serveur de mise à jour.</td></tr>
+            <tr><td><code>./install.sh</code></td><td>Première installation complète (Docker, modèles, services). <code>./install.sh --v1.0.0</code> installe une version précise récupérée depuis GitHub.</td></tr>
+            <tr><td><code>./doctor.sh</code></td><td><strong>Diagnostic et réparation automatique</strong> de bout en bout : Docker, <code>.env</code>, conteneurs, santé de chaque service, modèles, base de données, espace disque, canal de mise à jour. <code>--check-only</code> n'applique rien (audit seul) ; <code>--yes</code> répare sans confirmation. À lancer en premier devant n'importe quel dysfonctionnement.</td></tr>
             <tr><td><code>./restart.sh</code></td><td>Redémarre tous les services.</td></tr>
             <tr><td><code>./stop.sh</code></td><td>Arrête tous les services proprement.</td></tr>
-            <tr><td><code>./update.sh</code></td><td>Vérifie et applique une mise à jour distante, ou reconstruit depuis les fichiers locaux.</td></tr>
+            <tr><td><code>./update.sh</code></td><td>Vérifie et applique une mise à jour distante (GitHub), ou reconstruit depuis les fichiers locaux si aucune release plus récente n'est disponible.</td></tr>
             <tr><td><code>./version.sh</code></td><td>Affiche la version installée et si une mise à jour est disponible.</td></tr>
             <tr><td><code>./reset.sh</code></td><td>Réinitialise entièrement l'instance (données + paramètres).</td></tr>
+            <tr><td><code>./delete.sh</code></td><td>Supprime conteneurs, images et volumes Docker du projet (désinstallation).</td></tr>
             <tr><td><code>./export.sh</code></td><td>Crée une archive versionnée du projet, prête à déployer ailleurs.</td></tr>
             <tr><td><code>./help.sh</code></td><td>Ouvre cette page d'aide.</td></tr>
           </tbody>
@@ -529,50 +531,194 @@
 
       <section class="card" id="depannage" data-searchable>
         <h2>🩺 Dépannage</h2>
-        <p class="lead">Les situations les plus fréquemment rencontrées, et comment les résoudre.</p>
+        <p class="lead">Les situations rencontrées en production, classées par thème, avec leur correctif exact.</p>
+
+        <p><strong>Premier réflexe :</strong> lancez <code>./doctor.sh</code>. Il diagnostique l'installation de bout en bout et corrige automatiquement la plupart des cas ci-dessous (Docker, groupe <code>docker</code>, CRLF, permissions, dossiers manquants, port occupé, secrets, conteneurs arrêtés, modèles absents, écart de version après mise à jour, cache du canal de mise à jour…). <code>./doctor.sh --check-only</code> se contente d'auditer sans rien modifier.</p>
+
+        <h3>Installation &amp; Docker</h3>
 
         <details class="faq">
-          <summary>« Ollama n'a pas répondu dans le délai imparti »</summary>
+          <summary>« Ollama n'a pas répondu dans le délai imparti » / téléchargement de modèle qui échoue</summary>
           <div class="faq-body">
-            <p>Cause la plus fréquente : espace disque insuffisant pour télécharger le modèle. <code>install.sh</code> nettoie automatiquement le cache Docker et s'arrête tôt avec un message clair si l'espace restant est vraiment trop faible. Vérifiez avec <code>df -h</code> et <code>lsblk</code> (un plus grand disque existe peut-être mais n'est pas utilisé).</p>
+            <p>Cause la plus fréquente : espace disque insuffisant pour télécharger le modèle. <code>install.sh</code> et <code>doctor.sh</code> nettoient automatiquement le cache Docker et s'arrêtent tôt avec un message clair si l'espace restant est trop faible (moins de 2 Go). Vérifiez avec <code>df -h</code> et <code>lsblk</code> : un disque plus grand existe peut-être mais n'est pas monté sur la bonne partition. Il faut au moins ~4–8 Go libres selon le modèle choisi.</p>
           </div>
         </details>
 
         <details class="faq">
-          <summary>« Permission refusée » sur le socket Docker</summary>
+          <summary>« permission denied » sur <code>/var/run/docker.sock</code></summary>
           <div class="faq-body">
-            <p>L'utilisateur vient d'être ajouté au groupe <code>docker</code> mais la session n'a pas encore pris en compte le changement. <code>install.sh</code> tente de réactiver le groupe automatiquement (<code>newgrp</code>/<code>sg</code>/<code>sudo -g</code>) ; en dernier recours, déconnectez-vous puis reconnectez-vous.</p>
+            <p>L'utilisateur vient d'être ajouté au groupe <code>docker</code> mais la session shell ne l'a pas encore pris en compte. <code>install.sh</code> et <code>doctor.sh</code> tentent de réactiver le groupe à la volée (<code>newgrp</code> / <code>sg</code> / <code>sudo -g</code>) ; en dernier recours, déconnectez-vous puis reconnectez-vous (ou <code>ssh</code> à nouveau).</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« docker: 'compose' is not a docker command » / plugin compose introuvable</summary>
+          <div class="faq-body">
+            <p>Seul <code>docker-compose</code> v1 (l'ancien binaire) est présent ; le projet exige le plugin <strong>Docker Compose v2</strong> (<code>docker compose</code>, sans tiret). Installez le paquet <code>docker-compose-plugin</code> (ou réinstallez Docker via le script officiel <code>get.docker.com</code>, ce que fait <code>install.sh</code>).</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Le daemon Docker ne répond pas</summary>
+          <div class="faq-body">
+            <p>Sur Linux : <code>sudo systemctl start docker</code> (et <code>sudo systemctl enable docker</code> pour le démarrage automatique). Sur macOS/Windows : lancez Docker Desktop et attendez qu'il soit prêt. <code>doctor.sh</code> tente le redémarrage du service automatiquement.</p>
+          </div>
+        </details>
+
+        <h3>Scripts &amp; permissions de fichiers</h3>
+
+        <details class="faq">
+          <summary>« env: '…\r': No such file or directory » ou « env: opérande supplémentaire »</summary>
+          <div class="faq-body">
+            <p>Les scripts ont des fins de ligne Windows (CRLF), généralement après un transfert depuis Windows ou un éditeur mal configuré. Corrigez :</p>
+            <pre><code>sed -i 's/\r$//' *.sh</code></pre>
+            <p><code>doctor.sh</code> détecte et corrige ce cas.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« Permission denied » en lançant un script / fichiers appartenant à <code>root</code></summary>
+          <div class="faq-body">
+            <p>L'archive a été extraite avec <code>sudo</code>, ou une mise à jour a été lancée depuis l'interface web (processus root). Reprenez la propriété et le bit exécutable :</p>
+            <pre><code>sudo chown -R "$(id -un):$(id -gn)" ~/assistant-ia
+chmod +x ~/assistant-ia/*.sh</code></pre>
+            <p>Des fichiers possédés par <code>root</code> font aussi échouer <code>git pull</code> et <code>./update.sh</code>.</p>
           </div>
         </details>
 
         <details class="faq">
           <summary>« node : commande introuvable »</summary>
           <div class="faq-body">
-            <p>Certains scripts internes appellent Node.js via le conteneur <code>assistant-ia-updater</code> plutôt que sur la machine hôte. Si ce message apparaît, la copie du projet est probablement ancienne — redéployez la dernière archive.</p>
+            <p>Node.js n'est pas requis sur l'hôte : les scripts appellent Node via le conteneur <code>assistant-ia-updater</code>. Si ce message apparaît quand même, la copie du projet est ancienne — redéployez la dernière release.</p>
           </div>
         </details>
 
         <details class="faq">
-          <summary>« Permission non accordée » en lisant les scripts</summary>
+          <summary>« rsync » ou « sha256sum » introuvable</summary>
           <div class="faq-body">
-            <p>Les fichiers appartiennent à un autre utilisateur (souvent <code>root</code>, après une extraction avec <code>sudo</code>). Reprenez la main avec :</p>
-            <pre><code>sudo chown -R "$(id -un):$(id -gn)" ~/assistant-ia</code></pre>
+            <p>L'installation de base fonctionne sans eux, mais <code>./update.sh</code> et <code>./install.sh --vX.Y.Z</code> en ont besoin (synchronisation des fichiers et vérification d'intégrité des archives). Installez-les : <code>sudo apt install rsync coreutils</code>.</p>
           </div>
         </details>
 
-        <details class="faq">
-          <summary>« env: opérande supplémentaire » au lancement d'un script</summary>
-          <div class="faq-body">
-            <p>Le fichier a probablement des fins de ligne Windows (CRLF). Corrigez avec :</p>
-            <pre><code>sed -i 's/\r$//' *.sh</code></pre>
-          </div>
-        </details>
+        <h3>Réseau &amp; accès</h3>
 
         <details class="faq">
           <summary>Le port 3000 n'est pas accessible depuis le réseau</summary>
           <div class="faq-body">
-            <p>Si un pare-feu (UFW) est actif, <code>install.sh</code> ouvre automatiquement le port. En cas d'échec, ouvrez-le manuellement :</p>
+            <p>Si un pare-feu UFW est actif, <code>install.sh</code> ouvre le port automatiquement. Sinon, manuellement :</p>
             <pre><code>sudo ufw allow 3000/tcp</code></pre>
+            <p>Sur un serveur distant (cloud), pensez aussi au groupe de sécurité / pare-feu du fournisseur.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« Le port 3000 est déjà utilisé par un autre processus »</summary>
+          <div class="faq-body">
+            <p>Identifiez le processus : <code>sudo lsof -i :3000</code>. Arrêtez-le, ou changez <code>SERVER_PORT</code> dans <code>.env</code> puis <code>./restart.sh</code>.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Administration accessible sans HTTPS depuis Internet</summary>
+          <div class="faq-body">
+            <p>Pour une exposition publique : placez l'instance derrière un reverse proxy HTTPS (nginx, Caddy, Traefik), passez <code>COOKIE_SECURE=true</code> dans <code>.env</code>, et restreignez <code>/admin</code> via <code>ADMIN_ACCESS_MODE=local</code> ou un pare-feu.</p>
+          </div>
+        </details>
+
+        <h3>Configuration &amp; secrets</h3>
+
+        <details class="faq">
+          <summary>« Fichier .env absent » / secrets trop courts ou d'exemple</summary>
+          <div class="faq-body">
+            <p><code>install.sh</code> copie <code>.env.example</code> vers <code>.env</code> et génère les secrets (<code>JWT_SECRET</code>, <code>CONFIG_ENCRYPTION_KEY</code>). Si <code>.env</code> a été perdu ou contient encore des valeurs d'exemple, relancez <code>./doctor.sh</code> : il régénère les secrets manquants. <code>PROJECT_WORKSPACE_DIR</code> doit pointer sur le dossier réel du projet.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Un fichier JSON commence par un caractère invisible (BOM) et « JSON.parse échoue »</summary>
+          <div class="faq-body">
+            <p><code>version.json</code>, <code>update.config.json</code> ou <code>branding.json</code> a été réenregistré en UTF-8 avec BOM (souvent par un éditeur Windows). Réenregistrez le fichier en <strong>UTF-8 sans BOM</strong>, ou : <code>sed -i '1s/^\xEF\xBB\xBF//' fichier.json</code>.</p>
+          </div>
+        </details>
+
+        <h3>Mises à jour</h3>
+
+        <details class="faq">
+          <summary>Une mise à jour lancée dans le terminal n'apparaît pas dans l'admin web</summary>
+          <div class="faq-body">
+            <p>Corrigé en v1.021 : la page d'administration se rafraîchit désormais automatiquement en arrière-plan et au retour sur l'onglet. Sur une version antérieure, rechargez la page manuellement.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>La version affichée n'a pas changé après <code>./update.sh</code> (conteneurs pas reconstruits)</summary>
+          <div class="faq-body">
+            <p><code>version.json</code> sur le disque est plus récent que l'image Docker du backend : les fichiers ont été synchronisés mais l'image n'a pas été reconstruite. Terminez avec <code>./update.sh</code> (il reconstruit le backend), ou lancez <code>./doctor.sh</code> qui le détecte et reconstruit automatiquement. En dernier recours, revenez en arrière depuis l'onglet <em>Mises à jour</em> de l'administration.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Toute mise à jour ou rollback échoue avec le code 125</summary>
+          <div class="faq-body">
+            <p>Le conteneur <code>assistant-ia-updater</code> ne sait pas invoquer <code>docker compose</code>. Reconstruisez-le : <code>docker compose up -d --build updater</code>. <code>doctor.sh</code> tente cette reconstruction automatiquement ; sinon vérifiez <code>docker logs --tail 50 assistant-ia-updater</code>.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« Quota API GitHub atteint » (403) à la vérification de mise à jour</summary>
+          <div class="faq-body">
+            <p>Sur une IP partagée (NAT de campus, hébergement mutualisé), le quota GitHub non authentifié (60 requêtes/h) peut être épuisé par d'autres. Depuis v1.1.0, l'updater met la liste des releases en cache et plafonne ses appels à ~10/jour ; le fichier <code>.update-release-cache.json</code> est préservé lors des mises à jour. En attendant la fin de la fenêtre de quota, <code>./update.sh</code> se rabat automatiquement sur une reconstruction locale. Démarrez le conteneur updater pour bénéficier du cache.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« Dépôt de mise à jour introuvable » (404) ou « aucune release publiée »</summary>
+          <div class="faq-body">
+            <p>Vérifiez le champ <code>repository</code> de <code>update.config.json</code> (format <code>propriétaire/dépôt</code>) et qu'il pointe sur un dépôt <strong>public</strong> avec au moins une <em>release</em> GitHub publiée (voir <code>docs/GITHUB_RELEASES.md</code>). Sans release, seule la reconstruction locale fonctionne.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>« La dernière mise à jour a échoué après avoir synchronisé les fichiers »</summary>
+          <div class="faq-body">
+            <p>Une mise à jour distante s'est interrompue après la copie des fichiers mais avant la reconstruction. Relancez <code>./update.sh</code> pour la terminer, ou restaurez le point de sauvegarde indiqué depuis l'onglet <em>Mises à jour</em> de l'administration. Assurez-vous d'avoir au moins ~300 Mo libres (archive + extraction + sauvegarde de rollback).</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Mise à jour derrière un proxy d'entreprise</summary>
+          <div class="faq-body">
+            <p>Si un proxy sortant est configuré, <code>docker-compose.yml</code> doit passer <code>NODE_USE_ENV_PROXY=1</code> au conteneur updater, sinon la vérification des releases échoue silencieusement. <code>doctor.sh</code> signale ce cas.</p>
+          </div>
+        </details>
+
+        <h3>Services &amp; données</h3>
+
+        <details class="faq">
+          <summary>Un conteneur redémarre en boucle / ne démarre pas</summary>
+          <div class="faq-body">
+            <p>Consultez les journaux du service concerné : <code>docker compose logs -f backend</code> (ou <code>ollama</code>, <code>chromadb</code>, <code>redis</code>, <code>updater</code>). <code>doctor.sh</code> teste la santé de chaque service (Redis PING, heartbeat ChromaDB, <code>/api/health</code> du backend) et tente un redémarrage ciblé.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Un modèle Ollama est absent après installation</summary>
+          <div class="faq-body">
+            <p>Téléchargez-le manuellement : <code>docker exec assistant-ia-ollama ollama pull &lt;nom-du-modèle&gt;</code>. Vérifiez l'espace disque et l'orthographe exacte du modèle. <code>doctor.sh</code> propose de retélécharger les modèles manquants.</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Base de données SQLite corrompue ou en-tête invalide</summary>
+          <div class="faq-body">
+            <p>Le fichier <code>backend/data/*.sqlite</code> n'a pas une en-tête SQLite valide (coupure d'alimentation, disque plein pendant une écriture). Restaurez la dernière sauvegarde de <code>backend/data</code>. Sans sauvegarde, <code>./reset.sh</code> repart d'une base vide (perte de l'historique et de la configuration).</p>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Un compte initial utilise encore un mot de passe prévisible</summary>
+          <div class="faq-body">
+            <p>Changez-le immédiatement depuis l'administration, ou régénérez un mot de passe référent : <code>cd backend &amp;&amp; npm run password:reset-teacher</code> (force le changement à la prochaine connexion).</p>
           </div>
         </details>
       </section>
@@ -696,10 +842,58 @@
       fixedIn: "1.021"
     },
     {
+      title: "doctor.sh ne détectait pas les pannes de mise à jour",
+      description: "doctor.sh détecte et répare désormais de façon autonome les pannes de mise à jour rencontrées : écart entre version.json et l'image backend, conteneur updater incapable d'invoquer « docker compose » (code 125), mise à jour interrompue après synchronisation des fichiers.",
+      status: "done",
+      fixedIn: "1.0.6"
+    },
+    {
+      title: "Vérifications de mise à jour trop fréquentes",
+      description: "Les vérifications de mise à jour sont espacées à 5 minutes et l'heure du contrôle automatique est fixée à minuit, pour éviter de solliciter l'API GitHub en continu.",
+      status: "done",
+      fixedIn: "1.0.6"
+    },
+    {
+      title: "Quota API GitHub épuisé (erreur 403) sur IP partagée",
+      description: "Sur un NAT de campus ou un hébergement mutualisé, le quota GitHub non authentifié pouvait être épuisé. L'updater met maintenant la liste des releases en cache persistant (.update-release-cache.json, préservé lors des mises à jour), plafonne ses appels à ~10/jour avec déduplication des requêtes concurrentes, et l'endpoint public /releases est protégé par la même limite.",
+      status: "done",
+      fixedIn: "1.1.0"
+    },
+    {
+      title: "Le self-heal de l'updater dépendait du succès du rebuild backend",
+      description: "L'updater se réparait lui-même seulement si la reconstruction du backend réussissait, ce qui pouvait laisser une instance bloquée. Le self-heal de l'updater est désormais indépendant du rebuild backend.",
+      status: "done",
+      fixedIn: "1.0.8"
+    },
+    {
+      title: "Découverte du plugin docker compose dans l'updater",
+      description: "Le conteneur updater ne trouvait pas toujours le plugin « docker compose » v2, faisant échouer mises à jour et rollbacks (code 125).",
+      status: "done",
+      fixedIn: "1.0.2"
+    },
+    {
       title: "Aucune sauvegarde automatique des données",
-      description: "Un script de sauvegarde périodique (base de données + documents) est à l'étude.",
+      description: "Un script de sauvegarde périodique (base de données + documents) est à l'étude. En attendant, sauvegardez manuellement backend/data et backend/uploads.",
       status: "pending",
       fixedIn: null
+    },
+    {
+      title: "help.sh renvoie encore vers un serveur d'aide en ligne retiré",
+      description: "help.sh tente d'ouvrir une URL d'aide en ligne (maj.aymericmillot.com) qui n'est plus maintenue avant de retomber sur la copie locale docs/help.html. Le repli local fonctionne ; la référence distante doit être retirée.",
+      status: "pending",
+      fixedIn: null
+    },
+    {
+      title: "Incohérence de version entre les tags git et backend/package.json",
+      description: "version.json, backend/package.json et frontend/package.json (et leurs package-lock) sont désormais tous alignés sur le même numéro de version.",
+      status: "done",
+      fixedIn: "1.1.1"
+    },
+    {
+      title: "Mise à jour automatique laissée désactivable",
+      description: "L'interrupteur d'activation de la mise à jour automatique est retiré : la mise à jour est désormais toujours appliquée en arrière-plan chaque jour à minuit (00:00), report inclus si une conversation est en cours.",
+      status: "done",
+      fixedIn: "1.1.1"
     }
   ];
 

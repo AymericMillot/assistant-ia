@@ -136,7 +136,7 @@ Pour installer sur un serveur Linux sans cloner le dépôt (remplacer `vX.X.X` p
 affichée sur la page ci-dessus) :
 
 ```bash
-VERSION=v1.1.0
+VERSION=v1.1.1
 curl -fL -o assistant-ia-$VERSION.tar.gz \
   https://github.com/AymericMillot/assistant-ia/releases/download/$VERSION/assistant-ia-$VERSION.tar.gz
 # vérifier l'intégrité avec le SHA-256 publié dans la description de la release :

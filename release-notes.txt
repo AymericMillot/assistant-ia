@@ -1,3 +1,21 @@
+Version 1.1.1 — mise à jour automatique quotidienne par défaut (28 août 2026).
+
+La mise à jour automatique n'est plus une option à activer : elle est désormais
+toujours active. Chaque jour à minuit (00:00), la dernière version disponible est
+installée en arrière-plan si elle existe. L'opération reste reportée tant qu'une
+conversation est en cours (abandon pour la journée au-delà de
+AUTO_UPDATE_MAX_DEFER_MINUTES) et une sauvegarde de rollback est créée avant
+chaque installation.
+
+- L'interrupteur « Mise à jour automatique » disparaît de l'administration,
+  remplacé par un rappel du fonctionnement.
+- L'endpoint PUT /api/admin/update/schedule est retiré ; le GET répond
+  { enabled: true, time: "00:00", configurable: false }.
+- Les numéros de version de backend/package.json et frontend/package.json sont
+  réalignés sur version.json (1.1.1).
+
+---
+
 Version 1.1.0 — meilleures réponses et meilleur traitement des documents (28 août 2026).
 
 Cette version se concentre sur la qualité de la recherche documentaire et la

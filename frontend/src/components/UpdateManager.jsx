@@ -62,9 +62,6 @@ export default function UpdateManager() {
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
   const [showLogs, setShowLogs] = useState(false);
-  const [schedule, setSchedule] = useState({ enabled: false, time: "03:00" });
-  const [scheduleSaving, setScheduleSaving] = useState(false);
-  const [scheduleError, setScheduleError] = useState("");
 
   const busy = Boolean(status?.state?.busy);
   const backups = status?.backups || [];
@@ -118,36 +115,9 @@ export default function UpdateManager() {
     }
   }
 
-  async function loadSchedule() {
-    try {
-      const payload = await fetchJson("/api/admin/update/schedule");
-      setSchedule(payload);
-    } catch {
-      // Silencieux : la planification reste utilisable manuellement si cet
-      // appel echoue (ex. role sans acces), pas besoin de bloquer la page.
-    }
-  }
-
   useEffect(() => {
     loadStatus();
-    loadSchedule();
   }, []);
-
-  async function saveSchedule(patch) {
-    setScheduleSaving(true);
-    setScheduleError("");
-    try {
-      const payload = await fetchJson("/api/admin/update/schedule", {
-        method: "PUT",
-        body: JSON.stringify(patch)
-      });
-      setSchedule(payload);
-    } catch (requestError) {
-      setScheduleError(reportError("update:schedule", requestError));
-    } finally {
-      setScheduleSaving(false);
-    }
-  }
 
   useEffect(() => {
     if (status?.state?.status !== "unavailable") {
@@ -351,35 +321,14 @@ export default function UpdateManager() {
         </div>
 
         <div className="mt-5 rounded-[24px] border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Mise à jour automatique
-              </p>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Vérifie chaque jour à minuit (00:00) et installe la dernière version si elle est
-                disponible. Reportée si une conversation est en cours.
-              </p>
-            </div>
-            <label className="inline-flex cursor-pointer items-center gap-2 self-start sm:self-auto">
-              <input
-                type="checkbox"
-                className="h-5 w-5 rounded border-slate-300"
-                checked={schedule.enabled}
-                disabled={scheduleSaving}
-                onChange={(event) => saveSchedule({ enabled: event.target.checked })}
-              />
-              <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                {schedule.enabled ? "Activée" : "Désactivée"}
-              </span>
-            </label>
-          </div>
-
-          {scheduleError ? (
-            <Alert tone="error" className="mt-3">
-              {scheduleError}
-            </Alert>
-          ) : null}
+          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            Mise à jour automatique
+          </p>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            Chaque jour à minuit (00:00), la dernière version disponible est installée
+            automatiquement en arrière-plan. L&apos;opération est reportée si une conversation est en
+            cours, et une sauvegarde de rollback est créée avant chaque installation.
+          </p>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-3">

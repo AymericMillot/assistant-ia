@@ -13,8 +13,9 @@ const autoUpdateCheckMs = Number(process.env.AUTO_UPDATE_CHECK_MS || 60 * 1000);
 // Passe ce delai, on abandonne pour aujourd'hui plutot que de risquer une
 // mise a jour tres tardive dans la journee.
 const autoUpdateMaxDeferMinutes = Number(process.env.AUTO_UPDATE_MAX_DEFER_MINUTES || 180);
-// Heure fixe, non configurable : simplifie le reglage a un simple
-// interrupteur (activer/desactiver) plutot qu'un choix d'heure.
+// Mise a jour automatique toujours active, heure fixe non configurable :
+// chaque jour a minuit, la derniere version est installee en arriere-plan
+// si elle est disponible (reportee si une conversation est en cours).
 const AUTO_UPDATE_TIME = "00:00";
 
 let lastActivityAt = Date.now();
@@ -199,10 +200,6 @@ async function maybeRunScheduledUpdate() {
       import("../config/db.js"),
       import("./updateService.js")
     ]);
-
-    if (getSetting("autoUpdateEnabled", "false") !== "true") {
-      return;
-    }
 
     const scheduledTime = AUTO_UPDATE_TIME;
     const { date: today, time: currentTime } = getZonedDateAndTime(schedulerTimeZone);

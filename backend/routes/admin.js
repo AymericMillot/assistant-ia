@@ -1639,37 +1639,10 @@ router.post("/update/apply", requireRole(["referent", "administrator", "owner"])
   }
 });
 
-// L'heure de declenchement n'est pas configurable : fixee a minuit (00:00)
-// cote schedulerService.js pour garder ce reglage a un simple interrupteur.
+// La mise a jour automatique n'est plus configurable : elle s'applique toujours,
+// chaque jour a minuit (00:00), cote schedulerService.js.
 router.get("/update/schedule", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
-  res.json({
-    enabled: getSetting("autoUpdateEnabled", "false") === "true",
-    time: "00:00"
-  });
-});
-
-router.put("/update/schedule", requireRole(["referent", "administrator", "owner"]), (req, res, next) => {
-  try {
-    const enabled = parseOptionalBoolean(req.body?.enabled);
-    if (req.body?.enabled !== undefined && enabled === null) {
-      const error = new Error("Valeur booleenne invalide pour 'enabled'.");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    if (enabled !== null) {
-      setSetting("autoUpdateEnabled", enabled ? "true" : "false");
-    }
-
-    const payload = {
-      enabled: getSetting("autoUpdateEnabled", "false") === "true",
-      time: "00:00"
-    };
-    logAudit(req, "update.schedule.update", { details: payload });
-    res.json(payload);
-  } catch (error) {
-    next(error);
-  }
+  res.json({ enabled: true, time: "00:00", configurable: false });
 });
 
 router.post("/update/rollback", requireRole(["administrator", "owner"]), async (req, res, next) => {
