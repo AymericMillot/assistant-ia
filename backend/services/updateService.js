@@ -3,10 +3,6 @@ import path from "path";
 import { getCurrentVersion } from "./appInfoService.js";
 import { getSetting, getSettingDecrypted } from "../config/db.js";
 
-function isBetaChannelEnabled() {
-  return getSetting("updateChannelBeta", "false") === "true";
-}
-
 const updaterBaseUrl = process.env.UPDATER_URL || "http://updater:3010";
 // Jeton partage : authentifie le backend aupres de l'updater sur le reseau
 // Docker interne (voir requireSharedToken cote updater). Optionnel pour rester
@@ -189,8 +185,7 @@ function buildLocalReleasePayload() {
 
 export async function getUpdateStatus() {
   try {
-    const channelQuery = isBetaChannelEnabled() ? "?channel=beta" : "";
-    return await requestUpdater(`/status${channelQuery}`);
+    return await requestUpdater("/status");
   } catch (error) {
     const fallbackPayload = buildLocalReleasePayload();
     return {
@@ -211,22 +206,20 @@ export async function getUpdateStatus() {
 }
 
 export function applyUpdate(targetVersion) {
-  const channel = isBetaChannelEnabled() ? "beta" : "stable";
   return requestUpdater("/apply", {
     method: "POST",
-    body: JSON.stringify({
-      ...(targetVersion ? { targetVersion } : {}),
-      channel
-    })
+    body: JSON.stringify(
+      targetVersion
+        ? {
+            targetVersion
+          }
+        : {}
+    )
   });
 }
 
 export function getUpdateBackups() {
   return requestUpdater("/backups");
-}
-
-export function getUpdateChannel() {
-  return { beta: isBetaChannelEnabled() };
 }
 
 export function rollbackUpdate(backupId) {

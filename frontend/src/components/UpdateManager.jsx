@@ -6,45 +6,27 @@ import Alert from "./ui/Alert";
 import ConfirmDialog from "./ui/ConfirmDialog";
 import StatusBadge from "./ui/StatusBadge";
 
-// Coeur numerique ("1.0.5") avec identifiant beta optionnel ("1.0.5-beta.3") :
-// une beta se compare comme anterieure a la version stable de meme coeur, et
-// se classe par numero entre elles. Doit rester coherent avec la logique
-// equivalente cote updater/server.js.
 function normalizeVersionParts(version) {
-  const raw = String(version || "0").trim();
-  const [core, betaSuffix] = raw.split("-beta.");
-  const numericParts = core.split(".").map((part) => Number(part) || 0);
-  const betaNumber = betaSuffix !== undefined ? Number(betaSuffix) || 0 : null;
-  return { numericParts, betaNumber };
-}
-
-function isBetaVersion(version) {
-  return /-beta\.\d+$/.test(String(version || "").trim());
+  return String(version || "0")
+    .trim()
+    .split(".")
+    .map((part) => Number(part) || 0);
 }
 
 function compareVersions(left, right) {
   const a = normalizeVersionParts(left);
   const b = normalizeVersionParts(right);
-  const maxLength = Math.max(a.numericParts.length, b.numericParts.length);
+  const maxLength = Math.max(a.length, b.length);
 
   for (let index = 0; index < maxLength; index += 1) {
-    const leftValue = a.numericParts[index] || 0;
-    const rightValue = b.numericParts[index] || 0;
+    const leftValue = a[index] || 0;
+    const rightValue = b[index] || 0;
     if (leftValue !== rightValue) {
       return leftValue > rightValue ? 1 : -1;
     }
   }
 
-  if (a.betaNumber === b.betaNumber) {
-    return 0;
-  }
-  if (a.betaNumber === null) {
-    return 1;
-  }
-  if (b.betaNumber === null) {
-    return -1;
-  }
-  return a.betaNumber > b.betaNumber ? 1 : -1;
+  return 0;
 }
 
 function statusLabel(status) {
@@ -83,9 +65,6 @@ export default function UpdateManager() {
   const [schedule, setSchedule] = useState({ enabled: false, time: "03:00" });
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
-  const [channel, setChannel] = useState({ beta: false });
-  const [channelSaving, setChannelSaving] = useState(false);
-  const [channelError, setChannelError] = useState("");
 
   const busy = Boolean(status?.state?.busy);
   const backups = status?.backups || [];
@@ -149,39 +128,10 @@ export default function UpdateManager() {
     }
   }
 
-  async function loadChannel() {
-    try {
-      const payload = await fetchJson("/api/admin/update/channel");
-      setChannel(payload);
-    } catch {
-      // Silencieux : meme raisonnement que loadSchedule().
-    }
-  }
-
   useEffect(() => {
     loadStatus();
     loadSchedule();
-    loadChannel();
   }, []);
-
-  async function saveChannel(patch) {
-    setChannelSaving(true);
-    setChannelError("");
-    try {
-      const payload = await fetchJson("/api/admin/update/channel", {
-        method: "PUT",
-        body: JSON.stringify(patch)
-      });
-      setChannel(payload);
-      // Le canal change le calcul de "derniere version" (beta incluse ou non) :
-      // on recharge le statut pour refleter immediatement la bonne cible.
-      await loadStatus();
-    } catch (requestError) {
-      setChannelError(reportError("update:channel", requestError));
-    } finally {
-      setChannelSaving(false);
-    }
-  }
 
   async function saveSchedule(patch) {
     setScheduleSaving(true);
@@ -428,38 +378,6 @@ export default function UpdateManager() {
           ) : null}
         </div>
 
-        <div className="mt-3 rounded-[24px] border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Versions bêta
-              </p>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Inclut les versions bêta (non stables) dans la vérification et l&apos;installation
-                de mises à jour, manuelle comme automatique. Déconseillé en production.
-              </p>
-            </div>
-            <label className="inline-flex cursor-pointer items-center gap-2 self-start sm:self-auto">
-              <input
-                type="checkbox"
-                className="h-5 w-5 rounded border-slate-300"
-                checked={channel.beta}
-                disabled={channelSaving}
-                onChange={(event) => saveChannel({ beta: event.target.checked })}
-              />
-              <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                {channel.beta ? "Activées" : "Désactivées"}
-              </span>
-            </label>
-          </div>
-
-          {channelError ? (
-            <Alert tone="error" className="mt-3">
-              {channelError}
-            </Alert>
-          ) : null}
-        </div>
-
         <div className="mt-5 grid gap-3 md:grid-cols-3">
           <article className="rounded-[24px] border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
@@ -473,9 +391,8 @@ export default function UpdateManager() {
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
               Dernière version
             </p>
-            <p className="mt-3 flex items-center gap-2 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
+            <p className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-slate-50">
               {latestVersion || status?.currentVersion || "1.000"}
-              {isBetaVersion(latestVersion) ? <StatusBadge tone="warning">Bêta</StatusBadge> : null}
             </p>
             {latestReleaseUrl ? (
               <a
@@ -542,9 +459,6 @@ export default function UpdateManager() {
                         Version {release.version}
                       </span>
                       {isCurrent ? <StatusBadge tone="success">Installée</StatusBadge> : null}
-                      {isBetaVersion(release.version) ? (
-                        <StatusBadge tone="warning">Bêta</StatusBadge>
-                      ) : null}
                       {release.publishedAt ? (
                         <span className="text-xs text-slate-400 dark:text-slate-500">
                           {formatDateTime(release.publishedAt)}

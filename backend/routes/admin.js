@@ -1616,31 +1616,6 @@ router.post("/update/apply", requireRole(["referent", "administrator", "owner"])
   }
 });
 
-router.get("/update/channel", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
-  res.json({ beta: getSetting("updateChannelBeta", "false") === "true" });
-});
-
-router.put("/update/channel", requireRole(["referent", "administrator", "owner"]), (req, res, next) => {
-  try {
-    const beta = parseOptionalBoolean(req.body?.beta);
-    if (req.body?.beta !== undefined && beta === null) {
-      const error = new Error("Valeur booleenne invalide pour 'beta'.");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    if (beta !== null) {
-      setSetting("updateChannelBeta", beta ? "true" : "false");
-    }
-
-    const payload = { beta: getSetting("updateChannelBeta", "false") === "true" };
-    logAudit(req, "update.channel.update", { details: payload });
-    res.json(payload);
-  } catch (error) {
-    next(error);
-  }
-});
-
 // L'heure de declenchement n'est pas configurable : fixee a minuit (00:00)
 // cote schedulerService.js pour garder ce reglage a un simple interrupteur.
 router.get("/update/schedule", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
