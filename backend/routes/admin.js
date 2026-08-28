@@ -1616,18 +1616,6 @@ router.post("/update/apply", requireRole(["referent", "administrator", "owner"])
   }
 });
 
-const AUTO_UPDATE_TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
-
-function ensureAutoUpdateTime(value) {
-  const time = String(value || "").trim();
-  if (!AUTO_UPDATE_TIME_PATTERN.test(time)) {
-    const error = new Error("Heure invalide (format attendu HH:MM).");
-    error.statusCode = 400;
-    throw error;
-  }
-  return time;
-}
-
 router.get("/update/channel", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
   res.json({ beta: getSetting("updateChannelBeta", "false") === "true" });
 });
@@ -1653,28 +1641,31 @@ router.put("/update/channel", requireRole(["referent", "administrator", "owner"]
   }
 });
 
+// L'heure de declenchement n'est pas configurable : fixee a minuit (00:00)
+// cote schedulerService.js pour garder ce reglage a un simple interrupteur.
 router.get("/update/schedule", requireRole(["referent", "administrator", "owner"]), (_req, res) => {
   res.json({
     enabled: getSetting("autoUpdateEnabled", "false") === "true",
-    time: getSetting("autoUpdateTime", "03:00")
+    time: "00:00"
   });
 });
 
 router.put("/update/schedule", requireRole(["referent", "administrator", "owner"]), (req, res, next) => {
   try {
     const enabled = parseOptionalBoolean(req.body?.enabled);
-    const time = req.body?.time !== undefined ? ensureAutoUpdateTime(req.body.time) : null;
+    if (req.body?.enabled !== undefined && enabled === null) {
+      const error = new Error("Valeur booleenne invalide pour 'enabled'.");
+      error.statusCode = 400;
+      throw error;
+    }
 
     if (enabled !== null) {
       setSetting("autoUpdateEnabled", enabled ? "true" : "false");
     }
-    if (time !== null) {
-      setSetting("autoUpdateTime", time);
-    }
 
     const payload = {
       enabled: getSetting("autoUpdateEnabled", "false") === "true",
-      time: getSetting("autoUpdateTime", "03:00")
+      time: "00:00"
     };
     logAudit(req, "update.schedule.update", { details: payload });
     res.json(payload);
