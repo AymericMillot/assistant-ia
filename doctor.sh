@@ -560,6 +560,67 @@ container_name_for_service() {
   printf 'assistant-ia-%s' "$1"
 }
 
+# --- Etat Docker residuel : cause n°1 d'un « docker compose up » sorti en code
+# 125 lors d'une (re)installation. Deux situations reparees ici avant d'essayer
+# de (re)demarrer les services un par un, plus bas :
+#   1. conteneurs orphelins d'un essai precedent interrompu (manque d'espace,
+#      coupure reseau, Ctrl-C) : Docker refuse de les recreer
+#      (« The container name ... is already in use ») ;
+#   2. sous-systeme reseau du daemon en defaut (frequent sur Ubuntu juste apres
+#      l'installation de Docker, ou apres une bascule iptables/nftables) :
+#      toute creation de conteneur echoue en 125 tant que le daemon n'a pas
+#      ete redemarre.
+if docker info >/dev/null 2>&1; then
+  running_services_count="$(docker_compose ps --status running --services 2>/dev/null | grep -c . || true)"
+
+  stale_containers=""
+  for probe_service in "${CORE_SERVICES[@]}" frontend; do
+    probe_container="$(container_name_for_service "$probe_service")"
+    probe_state="$(docker inspect --format '{{.State.Status}}' "$probe_container" 2>/dev/null || true)"
+    if [[ -n "$probe_state" && "$probe_state" != "running" && "$probe_state" != "restarting" ]]; then
+      stale_containers+=" $probe_container"
+    fi
+  done
+
+  if [[ "${running_services_count:-0}" -eq 0 && -n "$stale_containers" ]]; then
+    say_fail "Conteneurs d'une installation interrompue presents alors qu'aucun service ne tourne :${stale_containers}."
+    echo "  -> Ils font echouer « docker compose up » en code 125 (« container name ... is already in use »)."
+    if confirm "Supprimer ces conteneurs residuels et le reseau Compose pour repartir propre ?"; then
+      docker_compose down --remove-orphans >/dev/null 2>&1 || true
+      docker rm -f $stale_containers >/dev/null 2>&1 || true
+      docker network rm "$PROJECT_COMPOSE_NETWORK" >/dev/null 2>&1 || true
+      say_fixed "Etat Compose residuel nettoye (les services sont (re)demarres ci-dessous)."
+    fi
+  fi
+
+  docker network rm assistant-ia-doctor-probe >/dev/null 2>&1 || true
+  if docker network create --driver bridge assistant-ia-doctor-probe >/dev/null 2>&1; then
+    docker network rm assistant-ia-doctor-probe >/dev/null 2>&1 || true
+    say_ok "Docker peut creer des reseaux bridge (pas de blocage reseau au demarrage des conteneurs)."
+  else
+    say_fail "Docker ne parvient pas a creer un reseau bridge : tout « docker compose up » echouera en code 125."
+    echo "  -> Cause frequente sur Ubuntu : daemon a redemarrer, ou bascule iptables-legacy necessaire."
+    if confirm "Redemarrer le service Docker maintenant (sudo) ?"; then
+      if command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl restart docker >/dev/null 2>&1 || true
+      elif command -v service >/dev/null 2>&1; then
+        sudo service docker restart >/dev/null 2>&1 || true
+      fi
+      for restart_wait in $(seq 1 20); do
+        docker info >/dev/null 2>&1 && break
+        sleep 1
+      done
+      docker network rm assistant-ia-doctor-probe >/dev/null 2>&1 || true
+      if docker network create --driver bridge assistant-ia-doctor-probe >/dev/null 2>&1; then
+        docker network rm assistant-ia-doctor-probe >/dev/null 2>&1 || true
+        say_fixed "Reseau Docker operationnel apres redemarrage du daemon."
+      else
+        say_fail "Toujours impossible de creer un reseau bridge. Verifiez : journalctl -u docker --no-pager | tail -50, puis « update-alternatives --config iptables » (choisir iptables-legacy) et « sudo systemctl restart docker »."
+      fi
+    fi
+  fi
+fi
+
 for service in "${CORE_SERVICES[@]}"; do
   container="$(container_name_for_service "$service")"
   status="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
