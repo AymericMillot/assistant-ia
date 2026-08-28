@@ -56,7 +56,9 @@ const hostWorkspaceDirOverride = String(process.env.UPDATE_HOST_WORKSPACE_DIR ||
 // chaque mise a jour/rollback pour repartir sur un etat propre, comme ./restart.sh.
 const fullStackRestartServices = ["ollama", "chromadb", "redis"];
 const remoteFetchTimeoutMs = Math.max(1000, Number(process.env.UPDATE_REMOTE_TIMEOUT_MS || 8000));
-const remoteReleaseTtlMs = Math.max(10000, Number(process.env.UPDATE_RELEASE_CACHE_TTL_MS || 60000));
+// 5 min par defaut : espace les appels a l'API GitHub (limite 60 req/h non
+// authentifiee, vite atteinte avec un polling frontend rapproche).
+const remoteReleaseTtlMs = Math.max(10000, Number(process.env.UPDATE_RELEASE_CACHE_TTL_MS || 5 * 60 * 1000));
 
 let hostWorkspaceDirPromise = null;
 // Cache par canal ("stable" / "beta") : eviter qu'une consultation beta ne
@@ -384,10 +386,27 @@ async function fetchGithubReleases(serverConfig, headers = {}, { includeBeta = f
   }
 
   const apiBaseUrl = String(serverConfig?.apiBaseUrl || "https://api.github.com").replace(/\/+$/, "");
+  // Jeton optionnel : l'API GitHub non authentifiée est limitee a 60 requetes/
+  // heure par IP (largement atteignable a plusieurs installations derriere la
+  // meme IP), contre 5000/heure une fois authentifie.
+  const githubToken = String(process.env.UPDATE_GITHUB_TOKEN || "").trim();
   const response = await fetchWithTimeout(`${apiBaseUrl}/repos/${repository}/releases?per_page=100`, {
-    headers: { Accept: "application/vnd.github+json", ...headers }
+    headers: {
+      Accept: "application/vnd.github+json",
+      ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
+      ...headers
+    }
   });
   if (!response.ok) {
+    const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
+    if (response.status === 403 && rateLimitRemaining === "0") {
+      const resetHeader = Number(response.headers.get("x-ratelimit-reset") || 0);
+      const resetAt = resetHeader ? new Date(resetHeader * 1000).toISOString() : "";
+      throw new Error(
+        `Limite de requêtes GitHub atteinte (403).${resetAt ? ` Réinitialisation vers ${resetAt}.` : ""} ` +
+          "Configurez UPDATE_GITHUB_TOKEN (jeton GitHub) pour relever cette limite."
+      );
+    }
     throw new Error(`Impossible de récupérer les releases GitHub (${response.status}).`);
   }
 

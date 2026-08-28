@@ -81,7 +81,6 @@ export default function UpdateManager() {
   const [confirmState, setConfirmState] = useState(null);
   const [showLogs, setShowLogs] = useState(false);
   const [schedule, setSchedule] = useState({ enabled: false, time: "03:00" });
-  const [scheduleDraftTime, setScheduleDraftTime] = useState("03:00");
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
   const [channel, setChannel] = useState({ beta: false });
@@ -144,7 +143,6 @@ export default function UpdateManager() {
     try {
       const payload = await fetchJson("/api/admin/update/schedule");
       setSchedule(payload);
-      setScheduleDraftTime(payload.time || "03:00");
     } catch {
       // Silencieux : la planification reste utilisable manuellement si cet
       // appel echoue (ex. role sans acces), pas besoin de bloquer la page.
@@ -194,7 +192,6 @@ export default function UpdateManager() {
         body: JSON.stringify(patch)
       });
       setSchedule(payload);
-      setScheduleDraftTime(payload.time || "03:00");
     } catch (requestError) {
       setScheduleError(reportError("update:schedule", requestError));
     } finally {
@@ -224,7 +221,7 @@ export default function UpdateManager() {
       if (!overlayVisible) {
         loadStatus();
       }
-    }, 20000);
+    }, 5 * 60 * 1000);
 
     function handleVisible() {
       if (document.visibilityState === "visible" && !overlayVisible) {
@@ -406,8 +403,8 @@ export default function UpdateManager() {
                 Mise à jour automatique
               </p>
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Vérifie chaque jour à l&apos;heure choisie et installe la dernière version si elle
-                est disponible. Reportée si une conversation est en cours.
+                Vérifie chaque jour à minuit (00:00) et installe la dernière version si elle est
+                disponible. Reportée si une conversation est en cours.
               </p>
             </div>
             <label className="inline-flex cursor-pointer items-center gap-2 self-start sm:self-auto">
@@ -422,26 +419,6 @@ export default function UpdateManager() {
                 {schedule.enabled ? "Activée" : "Désactivée"}
               </span>
             </label>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-              Heure de vérification
-              <input
-                type="time"
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                value={scheduleDraftTime}
-                onChange={(event) => setScheduleDraftTime(event.target.value)}
-                disabled={scheduleSaving}
-              />
-            </label>
-            <button
-              className="ghost-button px-3 py-1.5 text-xs"
-              disabled={scheduleSaving || scheduleDraftTime === schedule.time}
-              onClick={() => saveSchedule({ time: scheduleDraftTime })}
-            >
-              Enregistrer l&apos;heure
-            </button>
           </div>
 
           {scheduleError ? (

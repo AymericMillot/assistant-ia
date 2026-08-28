@@ -13,6 +13,9 @@ const autoUpdateCheckMs = Number(process.env.AUTO_UPDATE_CHECK_MS || 60 * 1000);
 // Passe ce delai, on abandonne pour aujourd'hui plutot que de risquer une
 // mise a jour tres tardive dans la journee.
 const autoUpdateMaxDeferMinutes = Number(process.env.AUTO_UPDATE_MAX_DEFER_MINUTES || 180);
+// Heure fixe, non configurable : simplifie le reglage a un simple
+// interrupteur (activer/desactiver) plutot qu'un choix d'heure.
+const AUTO_UPDATE_TIME = "00:00";
 
 let lastActivityAt = Date.now();
 let activeChatCount = 0;
@@ -201,7 +204,7 @@ async function maybeRunScheduledUpdate() {
       return;
     }
 
-    const scheduledTime = getSetting("autoUpdateTime", "03:00");
+    const scheduledTime = AUTO_UPDATE_TIME;
     const { date: today, time: currentTime } = getZonedDateAndTime(schedulerTimeZone);
 
     if (getSetting("lastAutoUpdateRunDate", "") === today) {
