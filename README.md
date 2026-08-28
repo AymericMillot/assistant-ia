@@ -203,6 +203,83 @@ Une fois termine, tu peux ouvrir :
 - application : [http://localhost:3000](http://localhost:3000)
 - admin : [http://localhost:3000/admin](http://localhost:3000/admin)
 
+## Installation manuelle avec Docker Compose
+
+`install.sh` reste la méthode recommandée (génération des secrets, hash du compte
+administrateur, téléchargement des modèles, garde-fous). Cette section décrit l'équivalent
+manuel pour qui veut piloter chaque étape.
+
+Il n'y a **pas d'image pré-construite publiée** sur un registre : l'image `backend` est
+construite localement à partir des sources. Il faut donc d'abord récupérer le dépôt (clone ou
+archive de release, voir plus haut).
+
+### 1. Préparer `.env`
+
+```bash
+cp .env.example .env
+```
+
+Puis générer les secrets absents (sinon le projet démarre avec des valeurs d'exemple non
+sûres) :
+
+```bash
+for key in JWT_SECRET CONFIG_ENCRYPTION_KEY UPDATER_SHARED_TOKEN OWNER_BOOTSTRAP_PASSWORD; do
+  sed -i "s|^${key}=.*|${key}=$(openssl rand -hex 32)|" .env
+done
+```
+
+Laisser `PROJECT_WORKSPACE_DIR` vide fait pointer les montages sur le dossier courant. Sur
+certains hôtes (chemins montés, `docker compose` lancé depuis ailleurs), renseigner le chemin
+absolu du dépôt.
+
+### 2. Démarrer l'infrastructure et le backend
+
+```bash
+docker compose up -d --build ollama chromadb redis backend updater
+```
+
+Le service `frontend` n'est **pas** lancé : en production le backend sert lui-même l'interface
+sur son port. Il n'existe que pour le développement, derrière le profil `frontend-dev`
+(`docker compose --profile frontend-dev up -d frontend`).
+
+### 3. Télécharger les modèles Ollama
+
+Le conteneur Ollama démarre vide. Télécharger le modèle de conversation et celui d'embedding
+définis dans `.env` (`DEFAULT_MODEL`, `EMBEDDING_MODEL`) :
+
+```bash
+docker exec assistant-ia-ollama ollama pull gemma2:2b
+docker exec assistant-ia-ollama ollama pull nomic-embed-text-v2-moe:latest
+```
+
+### 4. Créer le compte administrateur initial
+
+```bash
+ADMIN_PW="$(openssl rand -hex 16)"
+HASH="$(docker compose run --rm --no-deps \
+  -e "ADMIN_INITIAL_PASSWORD=$ADMIN_PW" backend \
+  node --input-type=module -e "import bcrypt from 'bcrypt'; console.log(await bcrypt.hash(process.env.ADMIN_INITIAL_PASSWORD, 12));")"
+sed -i "s|^ADMIN_PASSWORD_HASH=.*|ADMIN_PASSWORD_HASH=${HASH}|" .env
+grep -q '^ADMIN_PASSWORD_HASH=' .env || echo "ADMIN_PASSWORD_HASH=${HASH}" >> .env
+echo "Mot de passe administrateur : $ADMIN_PW"
+docker compose up -d backend   # recharge .env
+```
+
+Identifiant par défaut : `admin@assistant-ia.local`. Noter le mot de passe affiché (non
+rejouable).
+
+### 5. Vérifier
+
+```bash
+docker compose ps
+curl -fsS http://localhost:3000/api/health
+```
+
+Application sur [http://localhost:3000](http://localhost:3000), admin sur
+[http://localhost:3000/admin](http://localhost:3000/admin). Les commandes usuelles
+(`docker compose logs -f backend`, `down`, `up -d --build`) restent valables ; `./update.sh`
+et l'onglet « Mise à jour » de l'admin fonctionnent aussi sur une pile démarrée à la main.
+
 ## Scripts simples a connaitre
 
 Pour rendre l'utilisation du projet la plus simple possible, tu peux tout piloter avec ces scripts :
