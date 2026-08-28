@@ -12,8 +12,8 @@ USER="${USER:-$(id -un)}"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 DEPLOYMENT_INFO_FILE="$ROOT_DIR/backend/data/deployment.json"
-BACKEND_IMAGE_NAME="fablab-ai-backend"
-UPDATER_IMAGE_NAME="fablab-ai-updater"
+BACKEND_IMAGE_NAME="assistant-ia-backend"
+UPDATER_IMAGE_NAME="assistant-ia-updater"
 
 SCRIPT_ARGS=("$@")
 
@@ -31,7 +31,7 @@ fi
 
 # Une flotte peut injecter une valeur locale sans la placer dans le depot ni
 # dans la ligne de commande. Le fichier la contient sur sa première ligne.
-OWNER_PASSWORD_FILE="${FABLAB_OWNER_PASSWORD_FILE:-}"
+OWNER_PASSWORD_FILE="${ASSISTANT_IA_OWNER_PASSWORD_FILE:-}"
 for ((arg_index = 0; arg_index < ${#SCRIPT_ARGS[@]}; arg_index++)); do
   if [[ "${SCRIPT_ARGS[$arg_index]}" == "--owner-password-file" ]]; then
     next_index=$((arg_index + 1))
@@ -121,7 +121,7 @@ retry_on_network_failure() {
 install_requested_version() {
   local version="$1"
 
-  if [[ -n "${FABLAB_VERSION_APPLIED:-}" ]]; then
+  if [[ -n "${ASSISTANT_IA_VERSION_APPLIED:-}" ]]; then
     return 0
   fi
 
@@ -158,15 +158,17 @@ install_requested_version() {
     exit 1
   fi
 
-  local update_type base_url version_file_name package_template repository manifest_template
+  local update_type base_url version_file_name package_template repository api_base_url require_sha256
   update_type="$(json_string_field_from_file "$update_config_file" "type")"
   base_url="$(json_string_field_from_file "$update_config_file" "baseUrl")"
   version_file_name="$(json_string_field_from_file "$update_config_file" "versionFile")"
   package_template="$(json_string_field_from_file "$update_config_file" "packageFileTemplate")"
   repository="$(json_string_field_from_file "$update_config_file" "repository")"
-  manifest_template="$(json_string_field_from_file "$update_config_file" "manifestFileTemplate")"
+  api_base_url="$(json_string_field_from_file "$update_config_file" "apiBaseUrl")"
+  require_sha256="$(grep -o '"requireSha256"[[:space:]]*:[[:space:]]*[a-z]*' "$update_config_file" | head -n1 | grep -o '[a-z]*$')"
   version_file_name="${version_file_name:-version.json}"
-  manifest_template="${manifest_template:-fablab-ai-v\{version\}.manifest.json}"
+  api_base_url="${api_base_url:-https://api.github.com}"
+  api_base_url="${api_base_url%/}"
 
   if [[ -z "$package_template" ]]; then
     echo "Configuration du serveur de mise a jour incomplete (update.config.json)." >&2
@@ -180,9 +182,9 @@ install_requested_version() {
       echo "Le depot GitHub configure pour les mises a jour est invalide." >&2
       exit 1
     fi
-    local manifest_name
-    manifest_name="${manifest_template//\{version\}/$version}"
-    version_url="https://github.com/${repository}/releases/download/v${version}/${manifest_name}"
+    # Assets de release = uniquement le code source ; le SHA-256 est publie
+    # dans le corps de la release, lu ici via l'API GitHub.
+    version_url="${api_base_url}/repos/${repository}/releases/tags/v${version}"
     package_url="https://github.com/${repository}/releases/download/v${version}/${package_name}"
   else
     if [[ -z "$base_url" ]]; then
@@ -200,33 +202,34 @@ install_requested_version() {
   echo "    Verification de la version distante..." >&2
   local manifest_path="$temp_root/version.json"
   if ! retry_on_network_failure "Verification de la version distante" \
-    curl -fsSL "$version_url" -o "$manifest_path"; then
+    curl -fsSL -H "Accept: application/vnd.github+json" "$version_url" -o "$manifest_path"; then
     echo "Version ${version} introuvable sur le serveur de mise a jour (${version_url})." >&2
     exit 1
   fi
 
-  local remote_version remote_sha256 manifest_package_name
-  remote_version="$(json_string_field_from_file "$manifest_path" "version")"
-  remote_sha256="$(json_string_field_from_file "$manifest_path" "sha256")"
-  manifest_package_name="$(json_string_field_from_file "$manifest_path" "packageFile")"
-
-  if [[ "$remote_version" != "$version" ]]; then
-    echo "La version distante annoncee (${remote_version:-inconnue}) ne correspond pas a ${version} demandee." >&2
-    exit 1
-  fi
-
-  if [[ -n "$manifest_package_name" ]]; then
-    package_name="$manifest_package_name"
-    if [[ "$update_type" == "github-releases" ]]; then
-      package_url="https://github.com/${repository}/releases/download/v${version}/${package_name}"
-    else
-      package_url="${base_url%/}/${version}/${package_name}"
+  local remote_sha256
+  if [[ "$update_type" == "github-releases" ]]; then
+    # Extrait le premier "sha256 ... <64 hex>" du corps de la release (champ JSON "body").
+    remote_sha256="$(grep -oiE 'sha-?256[^0-9a-f]{0,40}[0-9a-f]{64}' "$manifest_path" | grep -oiE '[0-9a-f]{64}' | head -n1)"
+    [[ -z "$remote_sha256" ]] && remote_sha256="$(grep -oiE '[0-9a-f]{64}' "$manifest_path" | head -n1)"
+  else
+    local remote_version
+    remote_version="$(json_string_field_from_file "$manifest_path" "version")"
+    remote_sha256="$(json_string_field_from_file "$manifest_path" "sha256")"
+    if [[ "$remote_version" != "$version" ]]; then
+      echo "La version distante annoncee (${remote_version:-inconnue}) ne correspond pas a ${version} demandee." >&2
+      exit 1
     fi
   fi
 
   if [[ ! "$remote_sha256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
-    echo "Le manifest de la version ${version} ne contient pas de SHA256 valide." >&2
-    exit 1
+    if [[ "$require_sha256" == "false" ]]; then
+      echo "    (aucune empreinte SHA256 publiee ; verification ignoree car requireSha256=false)" >&2
+      remote_sha256=""
+    else
+      echo "Aucune empreinte SHA256 valide pour la version ${version} (corps de release)." >&2
+      exit 1
+    fi
   fi
 
   echo "    Telechargement de ${package_name}..." >&2
@@ -237,16 +240,18 @@ install_requested_version() {
     exit 1
   fi
 
-  echo "    Verification de l'integrite (SHA256)..." >&2
-  local computed_sha computed_sha_lower remote_sha256_lower
-  computed_sha="$(compute_sha256_file "$archive_path")"
-  # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
-  # cette syntaxe de minification introduite en bash 4.
-  computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
-  remote_sha256_lower="$(printf '%s' "$remote_sha256" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$computed_sha_lower" != "$remote_sha256_lower" ]]; then
-    echo "La verification SHA256 du package a echoue : version corrompue ou incidente." >&2
-    exit 1
+  if [[ -n "$remote_sha256" ]]; then
+    echo "    Verification de l'integrite (SHA256)..." >&2
+    local computed_sha computed_sha_lower remote_sha256_lower
+    computed_sha="$(compute_sha256_file "$archive_path")"
+    # tr plutot que ${var,,} : bash 3.2 (defaut sur macOS) ne supporte pas
+    # cette syntaxe de minification introduite en bash 4.
+    computed_sha_lower="$(printf '%s' "$computed_sha" | tr '[:upper:]' '[:lower:]')"
+    remote_sha256_lower="$(printf '%s' "$remote_sha256" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$computed_sha_lower" != "$remote_sha256_lower" ]]; then
+      echo "La verification SHA256 du package a echoue : version corrompue ou incidente." >&2
+      exit 1
+    fi
   fi
 
   echo "    Preparation des fichiers..." >&2
@@ -273,7 +278,7 @@ install_requested_version() {
   echo "    Application des fichiers de la version ${version}..." >&2
   local rsync_args=(-a --delete)
   local preserve_path
-  for preserve_path in .env update.config.json backend/uploads backend/logs backend/data .git .update-backups fablab-admin-cookie.txt export release .claude; do
+  for preserve_path in .env update.config.json backend/uploads backend/logs backend/data .git .update-backups assistant-ia-admin-cookie.txt export release .claude; do
     rsync_args+=("--exclude=/${preserve_path}")
   done
   rsync "${rsync_args[@]}" "$package_root"/ "$ROOT_DIR"/
@@ -282,7 +287,7 @@ install_requested_version() {
   trap - EXIT
 
   echo "==> Version ${version} installee. Poursuite de l'installation..." >&2
-  export FABLAB_VERSION_APPLIED=1
+  export ASSISTANT_IA_VERSION_APPLIED=1
   exec "$0" "${SCRIPT_ARGS[@]}"
 }
 
@@ -312,7 +317,7 @@ os_release_field() {
 reexec_under_docker_group() {
   local reexec_cmd
   reexec_cmd="$(printf '%q ' "$0" "${SCRIPT_ARGS[@]}")"
-  export FABLAB_NEWGRP_RETRY=1
+  export ASSISTANT_IA_NEWGRP_RETRY=1
 
   if command -v newgrp >/dev/null 2>&1; then
     exec newgrp docker <<EOF
@@ -443,7 +448,7 @@ check_docker() {
     # usermod) mais la session en cours ne l'a pas encore pris en compte.
     # Plutot que d'exiger une deconnexion, on relance le script sous
     # "newgrp docker" pour activer le groupe immediatement.
-    if [[ -z "${FABLAB_NEWGRP_RETRY:-}" ]] && getent group docker >/dev/null 2>&1 \
+    if [[ -z "${ASSISTANT_IA_NEWGRP_RETRY:-}" ]] && getent group docker >/dev/null 2>&1 \
       && id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
       echo "Cet utilisateur appartient au groupe docker, mais la session actuelle ne l'a pas encore pris en compte." >&2
       echo "-> Reactivation du groupe docker pour cette session (newgrp docker)..." >&2
@@ -490,9 +495,9 @@ check_docker() {
 check_port_available() {
   local port="$1"
   if command -v lsof >/dev/null 2>&1 && lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1; then
-    if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep -qx running \
-      && docker port fablab-backend "${port}/tcp" 2>/dev/null | grep -Eq ":${port}$"; then
-      echo "Le port ${port} est deja utilise par l'installation FablabAI en cours : reutilisation normale."
+    if docker inspect --format '{{.State.Status}}' assistant-ia-backend 2>/dev/null | grep -qx running \
+      && docker port assistant-ia-backend "${port}/tcp" 2>/dev/null | grep -Eq ":${port}$"; then
+      echo "Le port ${port} est deja utilise par l'installation Assistant IA en cours : reutilisation normale."
       return 0
     fi
     echo "Le port ${port} est deja utilise par un autre processus." >&2
@@ -764,7 +769,7 @@ if [[ -z "$current_admin_hash" ]]; then
       node --input-type=module -e "import bcrypt from 'bcrypt'; console.log(await bcrypt.hash(process.env.ADMIN_INITIAL_PASSWORD, 12));"
   )"
   update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
-  administrator_password_message="Identifiant administrateur : ${ADMIN_EMAIL:-admin@fablab.local} — mot de passe initial : ${initial_admin_password} (affiche une seule fois)"
+  administrator_password_message="Identifiant administrateur : ${ADMIN_EMAIL:-admin@assistant-ia.local} — mot de passe initial : ${initial_admin_password} (affiche une seule fois)"
 fi
 
 # Lit une reponse interactive avec un delai maximum de 10 minutes : au-dela,
@@ -858,7 +863,7 @@ retry_on_network_failure "Démarrage d'Ollama/ChromaDB/Redis (récupération des
 
 echo "Attente du démarrage d'Ollama..."
 for attempt in $(seq 1 60); do
-  if docker exec fablab-ollama ollama list >/dev/null 2>&1; then
+  if docker exec assistant-ia-ollama ollama list >/dev/null 2>&1; then
     break
   fi
 
@@ -872,14 +877,14 @@ done
 
 # Espace libre (en Ko) dans le volume ou Ollama stocke ses modeles.
 ollama_free_kb() {
-  docker exec fablab-ollama df -Pk /root/.ollama 2>/dev/null | tail -1 | awk '{print $4}'
+  docker exec assistant-ia-ollama df -Pk /root/.ollama 2>/dev/null | tail -1 | awk '{print $4}'
 }
 
 # Un pull interrompu par manque d'espace laisse des blobs "*-partial" qui
 # occupent l'espace sans etre reutilisables tels quels : on les purge pour
 # recuperer de la place avant la tentative suivante.
 cleanup_ollama_partial_downloads() {
-  docker exec fablab-ollama sh -c 'rm -f /root/.ollama/models/blobs/*-partial' >/dev/null 2>&1 || true
+  docker exec assistant-ia-ollama sh -c 'rm -f /root/.ollama/models/blobs/*-partial' >/dev/null 2>&1 || true
 }
 
 # Telecharge un modele Ollama. Distingue explicitement le manque d'espace
@@ -902,7 +907,7 @@ pull_ollama_model() {
   # (espace disque...) sans avoir a la reafficher a la main en cas d'echec.
   local pull_log pull_status pull_output
   pull_log="$(mktemp)"
-  if docker exec fablab-ollama ollama pull "$model" 2>&1 | tee "$pull_log"; then
+  if docker exec assistant-ia-ollama ollama pull "$model" 2>&1 | tee "$pull_log"; then
     pull_status=0
   else
     pull_status=$?

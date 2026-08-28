@@ -62,7 +62,7 @@ function resolvePackageFileName(serverConfig, version) {
     return packageFile.replace(/\{version\}/g, version);
   }
 
-  return packageFile || `fablab-ai-v${version}.tar.gz`;
+  return packageFile || `assistant-ia-v${version}.tar.gz`;
 }
 
 async function sha256OfFile(filePath) {
@@ -113,26 +113,26 @@ async function main() {
       throw new Error("Aucune release GitHub exploitable (tag vX.Y, ni brouillon ni prérelease).");
     }
     const version = String(release.tag_name || "").replace(/^v/i, "");
-    const manifestName = String(server.manifestFileTemplate || "fablab-ai-v{version}.manifest.json").replace(
-      /\{version\}/g,
-      version
-    );
-    const manifestAsset = (release.assets || []).find((asset) => asset.name === manifestName);
-    if (!manifestAsset?.browser_download_url) {
-      throw new Error("Le manifest de vérification est absent de la dernière release GitHub.");
-    }
-    const manifestResponse = await fetch(manifestAsset.browser_download_url);
-    if (!manifestResponse.ok) {
-      throw new Error(`Impossible de télécharger le manifest (${manifestResponse.status}).`);
-    }
-    const manifest = await manifestResponse.json();
-    const packageName = String(manifest.packageFile || resolvePackageFileName(server, version));
+    const packageName = resolvePackageFileName(server, version);
     const packageAsset = (release.assets || []).find((asset) => asset.name === packageName);
     if (!packageAsset?.browser_download_url) {
-      throw new Error("L'archive de la dernière release GitHub est absente.");
+      throw new Error("L'archive de code source est absente de la dernière release GitHub.");
     }
 
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fablab-update-test-"));
+    // SHA-256 publie dans le corps de la release (pas en asset).
+    const body = String(release.body || "");
+    const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const shaMatch =
+      body.match(new RegExp(`${escaped}[^0-9a-f]{0,20}([0-9a-f]{64})`, "i")) ||
+      body.match(/sha-?256[^0-9a-f]{0,40}([0-9a-f]{64})/i) ||
+      body.match(/\b([0-9a-f]{64})\b/i);
+    const expectedSha = shaMatch ? shaMatch[1].toLowerCase() : "";
+    const requireSha256 = server.requireSha256 !== false;
+    if (requireSha256 && !/^[0-9a-f]{64}$/.test(expectedSha)) {
+      throw new Error("Empreinte SHA-256 introuvable dans le corps de la dernière release GitHub.");
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "assistant-ia-update-test-"));
     const archivePath = path.join(tempDir, "release.tar.gz");
     const archiveResponse = await fetch(packageAsset.browser_download_url);
     if (!archiveResponse.ok || !archiveResponse.body) {
@@ -141,8 +141,8 @@ async function main() {
     await fs.writeFile(archivePath, Buffer.from(await archiveResponse.arrayBuffer()));
     const sha256 = await sha256OfFile(archivePath);
     await fs.rm(tempDir, { recursive: true, force: true });
-    if (sha256.toLowerCase() !== String(manifest.sha256 || "").toLowerCase()) {
-      throw new Error("Le SHA256 de l'archive GitHub ne correspond pas au manifest.");
+    if (expectedSha && sha256.toLowerCase() !== expectedSha) {
+      throw new Error("Le SHA256 de l'archive GitHub ne correspond pas à celui publié dans la release.");
     }
 
     console.log(JSON.stringify({ ok: true, version, packageSource: packageAsset.browser_download_url, sha256 }, null, 2));
@@ -169,7 +169,7 @@ async function main() {
   const version = versions[0];
   const releaseBaseUrl = joinUrl(baseUrl, version);
   const packageUrl = joinUrl(releaseBaseUrl, resolvePackageFileName(server, version));
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fablab-update-test-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "assistant-ia-update-test-"));
   const archivePath = path.join(tempDir, "release.tar.gz");
 
   const archiveResponse = await fetch(packageUrl);

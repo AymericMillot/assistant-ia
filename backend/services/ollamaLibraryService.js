@@ -3,7 +3,7 @@ import { logger } from "../config/logger.js";
 
 const libraryUrl = "https://ollama.com/library";
 const requestTimeoutMs = Number(process.env.OLLAMA_LIBRARY_TIMEOUT_MS || 15000);
-const userAgent = "FablabAI-ModelCatalogRefresh/1.0 (+https://ollama.com/library)";
+const userAgent = "Assistant IA-ModelCatalogRefresh/1.0 (+https://ollama.com/library)";
 
 // Capacites annoncees par ollama.com qui ne correspondent pas a un modele de
 // conversation general (embeddings, audio) : exclues du catalogue de chat.

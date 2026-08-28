@@ -4,7 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
-COOKIE_FILE="$ROOT_DIR/fablab-admin-cookie.txt"
+COOKIE_FILE="$ROOT_DIR/assistant-ia-admin-cookie.txt"
 
 os_release_field() {
   local field="$1"
@@ -357,7 +357,7 @@ EOF
 json_field() {
   local field="$1"
 
-  docker exec -i fablab-updater node -e '
+  docker exec -i assistant-ia-updater node -e '
     let input = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
@@ -391,7 +391,7 @@ ensure_updater_running() {
   fi
 
   for attempt in $(seq 1 30); do
-    if docker exec fablab-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then
+    if docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then
       return 0
     fi
 
@@ -403,5 +403,5 @@ ensure_updater_running() {
 }
 
 fetch_updater_status() {
-  docker exec fablab-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true
+  docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true
 }

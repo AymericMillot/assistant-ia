@@ -236,7 +236,7 @@ async function fetchText(url, { timeoutMs, accept = "*/*" }) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "FablabAI-Sitemap-Importer/1.0 (+local-rag)",
+        "User-Agent": "Assistant IA-Sitemap-Importer/1.0 (+local-rag)",
         Accept: accept,
         "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.6"
       }

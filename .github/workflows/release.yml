@@ -10,11 +10,11 @@ permissions:
 
 env:
   # Nom de base des archives de release. Doit rester aligne avec
-  # PACKAGE_BASENAME de export.sh et packageFileTemplate/manifestFileTemplate
-  # de update.config.json. Indispensable ici : le depot est extrait par
-  # actions/checkout dans un dossier portant le nom du depot, donc sans cette
-  # variable export.sh nommerait l'archive d'apres ce nom.
-  UPDATE_PROJECT_NAME: fablab-ai
+  # PACKAGE_BASENAME de export.sh et packageFileTemplate de update.config.json.
+  # Indispensable ici : actions/checkout extrait le depot dans un dossier
+  # portant le nom du depot, donc sans cette variable export.sh nommerait
+  # l'archive d'apres ce nom.
+  UPDATE_PROJECT_NAME: assistant-ia
 
 jobs:
   release:
@@ -37,18 +37,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build release archives
         run: ./export.sh
-      - name: Build signed metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          folder="export/$version"
-          base="${UPDATE_PROJECT_NAME}-v$version"
-          archive="$base.tar.gz"
-          test -f "$folder/$archive" || { echo "Archive introuvable : $folder/$archive" >&2; ls -la "$folder" >&2; exit 1; }
-          sha256="$(sha256sum "$folder/$archive" | awk '{print $1}')"
-          node -e "const fs=require('fs'); const [version,sha256,archive,out]=process.argv.slice(1); fs.writeFileSync(out, JSON.stringify({version,sha256,packageFile:archive,publishedAt:new Date().toISOString()},null,2)+'\\n')" "$version" "$sha256" "$archive" "$folder/$base.manifest.json"
-          cp release-notes.txt "$folder/$base.notes.md"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,9 +46,30 @@ jobs:
           version="${{ steps.version.outputs.version }}"
           folder="export/$version"
           base="${UPDATE_PROJECT_NAME}-v$version"
+
+          test -f "$folder/$base.tar.gz" || { echo "Archive introuvable : $folder/$base.tar.gz" >&2; ls -la "$folder" >&2; exit 1; }
+          test -f "$folder/$base.zip"    || { echo "Archive introuvable : $folder/$base.zip"    >&2; ls -la "$folder" >&2; exit 1; }
+
+          sha_targz="$(sha256sum "$folder/$base.tar.gz" | awk '{print $1}')"
+          sha_zip="$(sha256sum "$folder/$base.zip" | awk '{print $1}')"
+
+          # Le SHA-256 de l'archive est publie DANS le corps de la release
+          # (pas en asset separe) : le service de mise a jour le lit via l'API
+          # GitHub et refuse toute archive dont l'empreinte differe.
+          notes_file="$(mktemp)"
+          cat release-notes.txt > "$notes_file"
+          {
+            echo
+            echo "---"
+            echo "Vérification d'intégrité :"
+            echo '```'
+            echo "sha256 (${base}.tar.gz): ${sha_targz}"
+            echo "sha256 (${base}.zip): ${sha_zip}"
+            echo '```'
+          } >> "$notes_file"
+
+          # Assets = uniquement le code source (.tar.gz et .zip).
           gh release create "v$version" \
-            "$folder/$base.tar.gz#FablabAI $version (Linux)" \
-            "$folder/$base.zip#FablabAI $version (ZIP)" \
-            "$folder/$base.manifest.json#Manifest de vérification" \
-            "$folder/$base.notes.md#Notes de version" \
-            --title "FablabAI $version" --notes-file release-notes.txt
+            "$folder/$base.tar.gz#Code source ($version, .tar.gz)" \
+            "$folder/$base.zip#Code source ($version, .zip)" \
+            --title "Assistant IA $version" --notes-file "$notes_file"

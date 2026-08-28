@@ -27,9 +27,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$archiveUrl = "https://maj.aymericmillot.com/iutlab/fablab-ai.zip"
-$destinationRoot = Join-Path $HOME "fablab-ai"
-$zipPath = Join-Path $env:TEMP "fablab-ai-$([guid]::NewGuid().ToString('N')).zip"
+$archiveUrl = "https://maj.aymericmillot.com/iutlab/assistant-ia.zip"
+$destinationRoot = Join-Path $HOME "assistant-ia"
+$zipPath = Join-Path $env:TEMP "assistant-ia-$([guid]::NewGuid().ToString('N')).zip"
 
 function Write-Step {
   param([string]$Message)
@@ -37,11 +37,11 @@ function Write-Step {
   Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
-Write-Step "Telechargement de FablabAI..."
+Write-Step "Telechargement de Assistant IA..."
 Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
 
 if (Test-Path $destinationRoot) {
-  Write-Host "Un dossier fablab-ai existe deja dans $HOME : les fichiers seront mis a jour sur place (vos donnees dans backend/data et backend/uploads sont preservees, elles ne font pas partie de l'archive)." -ForegroundColor Yellow
+  Write-Host "Un dossier assistant-ia existe deja dans $HOME : les fichiers seront mis a jour sur place (vos donnees dans backend/data et backend/uploads sont preservees, elles ne font pas partie de l'archive)." -ForegroundColor Yellow
 } else {
   New-Item -ItemType Directory -Path $destinationRoot | Out-Null
 }
@@ -50,7 +50,7 @@ Write-Step "Extraction de l'archive..."
 Expand-Archive -Path $zipPath -DestinationPath $destinationRoot -Force
 Remove-Item $zipPath -Force
 
-# L'archive peut contenir un sous-dossier racine (ex: fablab-ai-main) : on retrouve
+# L'archive peut contenir un sous-dossier racine (ex: assistant-ia-main) : on retrouve
 # install.ps1 quel que soit le niveau d'imbrication plutot que de supposer sa position exacte.
 $installScript = Get-ChildItem -Path $destinationRoot -Filter "install.ps1" -Recurse -File |
   Select-Object -First 1

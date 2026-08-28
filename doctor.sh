@@ -530,7 +530,7 @@ done
 say_step "Base de donnees SQLite"
 
 SQLITE_PATH_VALUE="$(get_env_value "SQLITE_PATH")"
-SQLITE_RELATIVE_PATH="${SQLITE_PATH_VALUE:-./data/fablab.sqlite}"
+SQLITE_RELATIVE_PATH="${SQLITE_PATH_VALUE:-./data/assistant-ia.sqlite}"
 if [[ "$SQLITE_RELATIVE_PATH" = /* ]]; then
   SQLITE_HOST_PATH="$SQLITE_RELATIVE_PATH"
 else
@@ -557,7 +557,7 @@ CORE_SERVICES=(ollama chromadb redis backend updater)
 # Pas de tableau associatif (declare -A) : indisponible sur bash 3.2, present
 # par defaut sur macOS.
 container_name_for_service() {
-  printf 'fablab-%s' "$1"
+  printf 'assistant-ia-%s' "$1"
 }
 
 for service in "${CORE_SERVICES[@]}"; do
@@ -618,8 +618,8 @@ done
 # ---------------------------------------------------------------------------
 say_step "Sante des services"
 
-if docker inspect --format '{{.State.Status}}' fablab-redis 2>/dev/null | grep -q running; then
-  if docker exec fablab-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+if docker inspect --format '{{.State.Status}}' assistant-ia-redis 2>/dev/null | grep -q running; then
+  if docker exec assistant-ia-redis redis-cli ping 2>/dev/null | grep -q PONG; then
     say_ok "Redis repond (PING -> PONG)."
   else
     say_fail "Redis tourne mais ne repond pas a PING."
@@ -628,8 +628,8 @@ else
   say_fail "Redis n'est pas actif : impossible de verifier sa sante."
 fi
 
-if docker inspect --format '{{.State.Status}}' fablab-ollama 2>/dev/null | grep -q running; then
-  if docker exec fablab-ollama ollama list >/dev/null 2>&1; then
+if docker inspect --format '{{.State.Status}}' assistant-ia-ollama 2>/dev/null | grep -q running; then
+  if docker exec assistant-ia-ollama ollama list >/dev/null 2>&1; then
     say_ok "Ollama repond (ollama list)."
   else
     say_fail "Ollama tourne mais ne repond pas."
@@ -638,9 +638,9 @@ else
   say_fail "Ollama n'est pas actif : impossible de verifier sa sante."
 fi
 
-if docker inspect --format '{{.State.Status}}' fablab-chromadb 2>/dev/null | grep -q running; then
-  if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep -q running; then
-    if docker exec fablab-backend node -e "fetch('http://chromadb:8000/api/v2/heartbeat').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
+if docker inspect --format '{{.State.Status}}' assistant-ia-chromadb 2>/dev/null | grep -q running; then
+  if docker inspect --format '{{.State.Status}}' assistant-ia-backend 2>/dev/null | grep -q running; then
+    if docker exec assistant-ia-backend node -e "fetch('http://chromadb:8000/api/v2/heartbeat').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
       say_ok "ChromaDB repond (heartbeat via le reseau interne)."
     else
       say_fail "ChromaDB tourne mais ne repond pas sur son endpoint heartbeat."
@@ -652,12 +652,12 @@ else
   say_fail "ChromaDB n'est pas actif : impossible de verifier sa sante."
 fi
 
-if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep -q running; then
+if docker inspect --format '{{.State.Status}}' assistant-ia-backend 2>/dev/null | grep -q running; then
   if wait_for_http "$(get_local_base_url)/api/health" "Le backend" 5 1 >/dev/null 2>&1; then
     say_ok "Le backend repond sur /api/health."
 
     integrity_result="$(
-      docker exec fablab-backend node --input-type=module -e \
+      docker exec assistant-ia-backend node --input-type=module -e \
         "import { getDb } from './config/db.js'; const rows=getDb().pragma('integrity_check'); console.log(rows.every((row)=>row.integrity_check==='ok')?'ok':'invalid');" \
         2>/dev/null || true
     )"
@@ -668,15 +668,15 @@ if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep
     fi
 
     default_owner_status="$(
-      docker exec fablab-backend node --input-type=module -e \
-        "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier } from './config/db.js'; const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@fablab.local'); console.log(user && await bcrypt.compare('1234567890', user.passwordHash) ? 'insecure' : 'ok');" \
+      docker exec assistant-ia-backend node --input-type=module -e \
+        "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier } from './config/db.js'; const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@assistant-ia.local'); console.log(user && await bcrypt.compare('1234567890', user.passwordHash) ? 'insecure' : 'ok');" \
         2>/dev/null || true
     )"
     if [[ "$default_owner_status" == "insecure" ]]; then
       say_fail "Un compte initial utilise encore un ancien mot de passe previsible."
       if confirm "Synchroniser immediatement la configuration locale ?"; then
-        if docker exec fablab-backend node --input-type=module -e \
-          "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier, setSetting, updateAdminUserPasswordById } from './config/db.js'; const password=String(process.env.OWNER_BOOTSTRAP_PASSWORD||''); if(password.length<16) process.exit(2); const hash=await bcrypt.hash(password,12); setSetting('ownerPasswordHash',hash); const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@fablab.local'); if(user) updateAdminUserPasswordById(user.id,hash);"; then
+        if docker exec assistant-ia-backend node --input-type=module -e \
+          "import bcrypt from 'bcrypt'; import { findAdminUserByIdentifier, setSetting, updateAdminUserPasswordById } from './config/db.js'; const password=String(process.env.OWNER_BOOTSTRAP_PASSWORD||''); if(password.length<16) process.exit(2); const hash=await bcrypt.hash(password,12); setSetting('ownerPasswordHash',hash); const user=findAdminUserByIdentifier(process.env.ADMIN_EMAIL||'admin@assistant-ia.local'); if(user) updateAdminUserPasswordById(user.id,hash);"; then
           undo_last_fail
           say_fixed "Configuration locale synchronisee."
         else
@@ -690,7 +690,7 @@ if docker inspect --format '{{.State.Status}}' fablab-backend 2>/dev/null | grep
     fi
   else
     say_fail "Le backend tourne mais ne repond pas sur /api/health (port ${SERVER_PORT})."
-    echo "  -> Logs : docker logs --tail 50 fablab-backend"
+    echo "  -> Logs : docker logs --tail 50 assistant-ia-backend"
   fi
 else
   say_fail "Le backend n'est pas actif."
@@ -703,7 +703,7 @@ if [[ "${admin_access_mode:-any}" == "any" && "$server_bind_host" == "0.0.0.0" &
   say_warn "Administration exposee sur toutes les interfaces en HTTP. Pour Internet, utilisez HTTPS, COOKIE_SECURE=true et un pare-feu/reverse proxy."
 fi
 
-if docker exec fablab-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then
+if docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then
   say_ok "Le service de mise a jour repond sur /health."
 else
   say_fail "Le service de mise a jour ne repond pas."
@@ -713,8 +713,8 @@ fi
 # ---------------------------------------------------------------------------
 say_step "Modeles Ollama"
 
-if docker inspect --format '{{.State.Status}}' fablab-ollama 2>/dev/null | grep -q running; then
-  ollama_models="$(docker exec fablab-ollama ollama list 2>/dev/null || true)"
+if docker inspect --format '{{.State.Status}}' assistant-ia-ollama 2>/dev/null | grep -q running; then
+  ollama_models="$(docker exec assistant-ia-ollama ollama list 2>/dev/null || true)"
   DEFAULT_MODEL_VALUE="$(get_env_value "DEFAULT_MODEL")"
   EMBEDDING_MODEL_VALUE="$(get_env_value "EMBEDDING_MODEL")"
 
@@ -727,7 +727,7 @@ if docker inspect --format '{{.State.Status}}' fablab-ollama 2>/dev/null | grep 
     else
       say_warn "Modele ${model_name} absent d'Ollama."
       if confirm "Telecharger ${model_name} maintenant (peut prendre plusieurs minutes) ?"; then
-        if docker exec fablab-ollama ollama pull "$model_name" 2>&1 | tail -5; then
+        if docker exec assistant-ia-ollama ollama pull "$model_name" 2>&1 | tail -5; then
           undo_last_warn
           say_fixed "Modele ${model_name} telecharge."
         else
@@ -750,7 +750,7 @@ say_step "Coherence version <-> conteneurs"
 # de derniere modification de version.json.
 version_file="$ROOT_DIR/version.json"
 disk_version="$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$version_file" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
-backend_image="$(docker inspect --format '{{.Image}}' fablab-backend 2>/dev/null || true)"
+backend_image="$(docker inspect --format '{{.Image}}' assistant-ia-backend 2>/dev/null || true)"
 if [[ -z "$backend_image" ]]; then
   say_warn "Conteneur backend absent : impossible de verifier la coherence de version (demarrez le projet)."
 else
@@ -771,7 +771,7 @@ fi
 
 # Etat residuel d'une mise a jour interrompue cote updater (si le conteneur
 # n'a pas redemarre depuis).
-updater_state="$(docker exec fablab-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true)"
+updater_state="$(docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true)"
 if [[ -n "$updater_state" ]]; then
   updater_status="$(printf '%s' "$updater_state" | grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
   if [[ "$updater_status" == "error" ]]; then
@@ -857,8 +857,8 @@ else
       # Test de l'acces reel DEPUIS le conteneur updater (c'est lui qui fait la
       # requete en production, pas l'hote) : detecte un blocage reseau/proxy
       # propre au conteneur meme quand l'hote, lui, joint GitHub.
-      if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx fablab-updater; then
-        updater_gh_code="$(docker exec fablab-updater sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Accept: application/vnd.github+json" '"${update_api_base}/repos/${update_repository}/releases?per_page=1"'' 2>/dev/null || echo "000")"
+      if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx assistant-ia-updater; then
+        updater_gh_code="$(docker exec assistant-ia-updater sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Accept: application/vnd.github+json" '"${update_api_base}/repos/${update_repository}/releases?per_page=1"'' 2>/dev/null || echo "000")"
         if [[ "$updater_gh_code" == "200" ]]; then
           say_ok "Le conteneur updater atteint l'API GitHub."
         elif [[ "$releases_http" == "200" ]]; then

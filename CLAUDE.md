@@ -72,9 +72,9 @@ Initialized in `config/db.js`. Key tables:
 
 ### Extra ChromaDB collections
 
-Besides per-folder collections (`fablab_<folder>`), retrieval also queries:
-- `fablab_web_links` — scraped content of admin document links (`webScrapeService.js`); cited as clickable sources
-- `fablab_attachments` — user attachment content; used for answers but never shown as a downloadable source
+Besides per-folder collections (`assistant_<folder>`), retrieval also queries:
+- `assistant_web_links` — scraped content of admin document links (`webScrapeService.js`); cited as clickable sources
+- `assistant_attachments` — user attachment content; used for answers but never shown as a downloadable source
 
 ### Document indexing pipeline
 

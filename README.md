@@ -1,6 +1,6 @@
-# FablabAI
+# Assistant IA
 
-Assistant IA local pour un atelier, fablab ou tout environnement technique, sous licence MIT.
+Assistant IA local pour un atelier, makerspace ou tout environnement technique, sous licence MIT.
 
 Ce projet permet de poser des questions a une IA locale, d'ajouter des documents internes, puis d'obtenir des reponses orientees par ces documents et par les consignes definies dans l'administration. Le nom du projet, les textes affiches et le perimetre thematique sont personnalisables (voir [docs/CONFIGURATION.md](docs/CONFIGURATION.md)) — l'exemple ci-dessous reste generique, chaque instance peut se presenter sous son propre nom.
 
@@ -90,7 +90,7 @@ Configuration conseillee :
 ## Structure rapide du projet
 
 ```text
-fablab-ai/
+assistant-ia/
 ├── docker-compose.yml
 ├── .env.example
 ├── install.sh
@@ -492,7 +492,7 @@ docker compose ps
 Pour un debutant, la procedure la plus simple est :
 
 ```bash
-cd "/chemin/vers/fablab-ai"
+cd "/chemin/vers/assistant-ia"
 chmod +x install.sh
 ./install.sh
 ```
@@ -502,39 +502,52 @@ Puis :
 - ouvre [http://localhost:3000](http://localhost:3000)
 - ouvre [http://localhost:3000/admin](http://localhost:3000/admin) pour l'administration
 
-## Publier une mise à jour distante (développeur)
+## Publier une version (développeur)
 
-Le serveur de mise à jour configuré pour cette instance (`update.config.json`) sert de dossier par
-version, contenant l'archive `fablab-ai-v<version>.tar.gz`, le manifest `version.json` (version +
-SHA256) et `release-notes.txt`. Si vous forkez ce projet pour votre propre déploiement, remplacez
-cette URL par votre propre serveur avant de publier des mises à jour (voir
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md)) — sinon vos instances tenteraient de lire le
-serveur du projet d'origine.
+Les mises à jour sont distribuées via les **GitHub Releases** du dépôt indiqué dans
+`update.config.json` (`server.repository`). Ce dépôt doit être **public**.
 
-Les instances lisent ce serveur en HTTPS public : elles n'ont besoin d'aucun identifiant.
-Les identifiants FTP ne servent qu'à publier, depuis le poste développeur.
+Chaque release `vX.X.X` porte **uniquement le code source** en pièces jointes :
 
-Pour publier une nouvelle version :
+| Asset | Rôle |
+|---|---|
+| `assistant-ia-vX.X.X.tar.gz` | archive utilisée pour les mises à jour Linux |
+| `assistant-ia-vX.X.X.zip` | même contenu, format ZIP |
 
-1. mettre à jour la version dans `version.json` (ex. `1.013`)
-2. écrire les notes dans `release-notes.txt` à la racine
-3. copier `.env.publish.example` vers `.env.publish` et renseigner le mot de passe FTP
-   (fichier ignoré par git, à ne jamais commiter)
+Le **SHA-256** de l'archive `.tar.gz` est écrit **dans la description de la release** (aucun
+fichier `.manifest.json` ni `.notes.md`) :
+
+```
+sha256 (assistant-ia-vX.X.X.tar.gz): <64 hexadécimaux>
+```
+
+Pour publier :
+
+1. mettre à jour `version.json` (`vX.X.X`, semver) ;
+2. écrire les notes dans `release-notes.txt` à la racine ;
+3. commiter (l'arbre de travail doit être propre) ;
 4. lancer :
 
 ```bash
-./publish-release.sh            # construit, hash, téléverse en FTPS, vérifie l'URL publique
-./publish-release.sh --dry-run  # prépare tout sans téléverser
+./publish-release.sh            # construit les archives, calcule le SHA-256, pousse le tag vX.X.X
+./publish-release.sh --dry-run  # vérifie sans créer ni pousser de tag
 ```
 
-Côté instance, la mise à jour s'installe depuis l'admin (onglet « Mise à jour »)
-ou avec `./update.sh`. Chaque installation :
+Le workflow `.github/workflows/release.yml` crée alors la GitHub Release, y écrit le SHA-256 et
+attache les deux archives.
 
-- vérifie le manifest et la somme SHA256 (obligatoire),
-- contrôle l'archive (rejet des chemins absolus, des `..` et des liens symboliques),
-- crée une sauvegarde de rollback automatique (3 conservées, restaurables depuis l'admin),
-- remplace intégralement le code applicatif en préservant `.env`, les documents,
-  les données et les logs.
+Côté instance, la mise à jour s'installe depuis l'admin (onglet « Mise à jour ») ou avec
+`./update.sh`. Chaque installation :
+
+- résout la dernière release `vX.X.X` (brouillons et préreleases ignorés) ;
+- télécharge `assistant-ia-vX.X.X.tar.gz` et vérifie son SHA-256 contre celui de la description
+  de la release (obligatoire par défaut, `requireSha256`) ;
+- contrôle l'archive (rejet des chemins absolus, des `..` et des liens symboliques) ;
+- crée une sauvegarde de rollback automatique (3 conservées, restaurables depuis l'admin) ;
+- remplace intégralement le code applicatif en préservant `.env`, `update.config.json`, les
+  documents, les données et les logs.
+
+Détails : [docs/GITHUB_RELEASES.md](docs/GITHUB_RELEASES.md).
 
 ## Documentation complémentaire
 

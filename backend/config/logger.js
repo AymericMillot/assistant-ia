@@ -34,7 +34,7 @@ const jsonFormat = winston.format.combine(
 export const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || "info",
   format: jsonFormat,
-  defaultMeta: { service: "fablab-backend" },
+  defaultMeta: { service: "assistant-ia-backend" },
   transports: [
     new winston.transports.Console({
       format: winston.format.combine(

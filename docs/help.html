@@ -465,7 +465,7 @@
         </ul>
 
         <h3>Installation</h3>
-        <pre><code>cd fablab-ai
+        <pre><code>cd assistant-ia
 ./install.sh</code></pre>
         <p>Le script installe Docker si besoin, construit les images, télécharge un modèle d'IA adapté à la machine, démarre tous les services, puis crée le compte administrateur initial.</p>
 
@@ -548,7 +548,7 @@
         <details class="faq">
           <summary>« node : commande introuvable »</summary>
           <div class="faq-body">
-            <p>Certains scripts internes appellent Node.js via le conteneur <code>fablab-updater</code> plutôt que sur la machine hôte. Si ce message apparaît, la copie du projet est probablement ancienne — redéployez la dernière archive.</p>
+            <p>Certains scripts internes appellent Node.js via le conteneur <code>assistant-ia-updater</code> plutôt que sur la machine hôte. Si ce message apparaît, la copie du projet est probablement ancienne — redéployez la dernière archive.</p>
           </div>
         </details>
 
@@ -556,7 +556,7 @@
           <summary>« Permission non accordée » en lisant les scripts</summary>
           <div class="faq-body">
             <p>Les fichiers appartiennent à un autre utilisateur (souvent <code>root</code>, après une extraction avec <code>sudo</code>). Reprenez la main avec :</p>
-            <pre><code>sudo chown -R "$(id -un):$(id -gn)" ~/fablab-ai</code></pre>
+            <pre><code>sudo chown -R "$(id -un):$(id -gn)" ~/assistant-ia</code></pre>
           </div>
         </details>
 

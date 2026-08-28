@@ -94,7 +94,7 @@ rm -rf "$ROOT_DIR/updater/node_modules"
 rm -rf "$ROOT_DIR/.update-backups"
 rm -rf "$ROOT_DIR/export"
 rm -rf "$ROOT_DIR/release"
-rm -f "$ROOT_DIR/fablab-admin-cookie.txt"
+rm -f "$ROOT_DIR/assistant-ia-admin-cookie.txt"
 rm -f "$ROOT_DIR/.env"
 rm -f "$ROOT_DIR/.env.publish"
 find "$ROOT_DIR" -maxdepth 3 -name ".DS_Store" -delete 2>/dev/null || true

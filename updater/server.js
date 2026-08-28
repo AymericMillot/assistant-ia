@@ -50,7 +50,7 @@ const port = Number(process.env.UPDATE_PORT || process.env.PORT || 3010);
 const backupStoreDir = path.join(workspaceDir, ".update-backups");
 const maxBackupVersions = Math.max(1, Number(process.env.UPDATE_BACKUP_RETENTION || 3));
 const composeProjectName =
-  String(process.env.UPDATE_PROJECT_NAME || "").trim() || path.basename(workspaceDir) || "fablab-ai";
+  String(process.env.UPDATE_PROJECT_NAME || "").trim() || path.basename(workspaceDir) || "assistant-ia";
 const hostWorkspaceDirOverride = String(process.env.UPDATE_HOST_WORKSPACE_DIR || "").trim();
 // Services tiers sans code applicatif propre : redemarres (pas reconstruits) apres
 // chaque mise a jour/rollback pour repartir sur un etat propre, comme ./restart.sh.
@@ -207,7 +207,7 @@ const DEFAULT_UPDATE_CONFIG = {
   server: {
     baseUrl: "",
     versionFile: "version.json",
-    packageFile: "fablab-ai-update.tar.gz",
+    packageFile: "assistant-ia-update.tar.gz",
     notesFile: "release-notes.txt",
     headers: {}
   },
@@ -257,7 +257,7 @@ function extractDirectoryLinksFromIndex(html) {
 }
 
 function parseVersionFromPackageName(fileName) {
-  const match = String(fileName || "").match(/fablab-ai-v(\d+(?:\.\d+)*)\.tar\.gz$/i);
+  const match = String(fileName || "").match(/assistant-ia-v(\d+(?:\.\d+)*)\.tar\.gz$/i);
   return match?.[1] || "";
 }
 
@@ -345,7 +345,7 @@ function resolvePackageFileName(serverConfig, version) {
     return packageFile.replace(/\{version\}/g, version);
   }
 
-  return packageFile || `fablab-ai-v${version}.tar.gz`;
+  return packageFile || `assistant-ia-v${version}.tar.gz`;
 }
 
 function normalizeGithubReleaseVersion(tagName) {
@@ -379,42 +379,40 @@ async function fetchGithubReleases(serverConfig, headers = {}) {
         if (!isVersionFolderName(version)) {
           return null;
         }
-        const manifestName = String(serverConfig?.manifestFileTemplate || "fablab-ai-v{version}.manifest.json").replace(
-          /\{version\}/g,
-          version
-        );
-        const manifestAsset = findGithubAsset(release.assets, manifestName);
-        if (!manifestAsset?.browser_download_url) {
-          return null;
-        }
-        const manifest = await tryFetchJson(manifestAsset.browser_download_url, headers, null);
-        if (!manifest || String(manifest.version || "") !== version) {
-          return null;
-        }
-        // Le SHA-256 est le seul rempart contre une archive alteree : un manifest
-        // dont l'empreinte n'a pas le format attendu (64 hex) est traite comme
-        // une release incomplete et ignore, plutot que propage jusqu'a l'application.
-        const manifestSha = String(manifest.sha256 || "").toLowerCase();
-        if (!/^[a-f0-9]{64}$/.test(manifestSha)) {
-          return null;
-        }
-        const packageName = String(manifest.packageFile || resolvePackageFileName(serverConfig, version));
+
+        // Assets = uniquement le code source. On resout l'archive .tar.gz
+        // attendue par nom.
+        const packageName = resolvePackageFileName(serverConfig, version);
         const packageAsset = findGithubAsset(release.assets, packageName);
         if (!packageAsset?.browser_download_url) {
           return null;
         }
-        const notesAsset = findGithubAsset(release.assets, `fablab-ai-v${version}.notes.md`);
-        const notes = notesAsset?.browser_download_url
-          ? (await tryFetchText(notesAsset.browser_download_url, headers)).trim()
-          : String(release.body || "").trim();
+
+        // Le SHA-256 est publie dans le corps de la release, pas en asset.
+        // Format attendu : "sha256 (<archive>.tar.gz): <64 hex>" ; a defaut,
+        // le premier "sha256 ... <64 hex>" du corps.
+        const body = String(release.body || "");
+        const escapedPackage = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const targetedSha =
+          body.match(new RegExp(`${escapedPackage}[^0-9a-f]{0,20}([0-9a-f]{64})`, "i")) ||
+          body.match(/sha-?256[^0-9a-f]{0,40}([0-9a-f]{64})/i) ||
+          body.match(/\b([0-9a-f]{64})\b/i);
+        const sha256 = targetedSha ? targetedSha[1].toLowerCase() : "";
+
+        const requireSha256 = serverConfig?.requireSha256 !== false;
+        if (requireSha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
+          // Empreinte obligatoire mais introuvable dans le corps : release ignoree.
+          return null;
+        }
+
         return {
           version,
           packageUrl: packageAsset.browser_download_url,
-          notes,
-          notesUrl: notesAsset?.browser_download_url || release.html_url || "",
+          notes: body.trim(),
+          notesUrl: release.html_url || "",
           releaseUrl: release.html_url || String(serverConfig?.latestReleaseUrl || ""),
-          sha256: manifestSha,
-          publishedAt: release.published_at || manifest.publishedAt || ""
+          sha256,
+          publishedAt: release.published_at || ""
         };
       })
   );
@@ -522,7 +520,7 @@ async function fetchRemoteReleases() {
 
   const versionPayload = await response.json();
   const notesUrl = joinUrl(baseUrl, config.server.notesFile || "release-notes.txt");
-  const packageUrl = joinUrl(baseUrl, config.server.packageFile || "fablab-ai-update.tar.gz");
+  const packageUrl = joinUrl(baseUrl, config.server.packageFile || "assistant-ia-update.tar.gz");
   const notes = await tryFetchText(notesUrl, headers);
   const publishedAt =
     (await tryFetchLastModified(notesUrl, headers, "")) ||
@@ -1110,7 +1108,7 @@ function triggerDetachedComposeUpdate(services) {
           "-lc",
           `PROJECT_WORKSPACE_DIR="${hostWorkspaceDir}" docker-compose -p "${composeProjectName}" -f "${path.join(workspaceDir, "docker-compose.yml")}" up -d --build ${services
             .map((service) => `"${service}"`)
-            .join(" ")} >/tmp/fablab-updater-detached.log 2>&1 &`
+            .join(" ")} >/tmp/assistant-ia-updater-detached.log 2>&1 &`
         ],
         {
           cwd: workspaceDir,
@@ -1127,7 +1125,7 @@ function triggerDetachedComposeUpdate(services) {
 }
 
 async function restoreBackupArchive(archivePath, preservePaths = []) {
-  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "fablab-rollback-"));
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-rollback-"));
   try {
     const extractRoot = path.join(tempRoot, "extract");
     await ensureDir(extractRoot);
@@ -1297,7 +1295,7 @@ async function applyUpdateInBackground(targetVersion = "") {
       latestVersion
     });
 
-    const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "fablab-update-"));
+    const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-update-"));
     try {
       const archivePath = path.join(tempRoot, "release.tar.gz");
       await downloadFile(packageUrl, archivePath, config.server.headers || {});
@@ -1551,7 +1549,7 @@ function getDeployFtpConfig(override = {}) {
       .trim()
       .replace(/^\/+|\/+$/g, ""),
     // Dossier ou est deposee la derniere version en .zip sous un nom fixe
-    // (fablab-ai.zip), pour l'installation web en une commande - separe du
+    // (assistant-ia.zip), pour l'installation web en une commande - separe du
     // dossier versionne ci-dessus. Par defaut, un niveau au-dessus de
     // remoteDir (ex: remoteDir "iutlab/maj" -> latestZipDir "iutlab").
     latestZipDir: String(override.latestZipDir ?? process.env.DEPLOY_LATEST_ZIP_DIR ?? "")
@@ -1597,18 +1595,18 @@ const exportExcludes = [
   "data",
   "logs",
   "uploads",
-  "fablab-admin-cookie.txt"
+  "assistant-ia-admin-cookie.txt"
 ];
 
 async function buildExportArchive(version) {
   const exportRoot = path.join(workspaceDir, "export", version);
   await ensureDir(exportRoot);
-  const archiveName = `fablab-ai-v${version}.tar.gz`;
+  const archiveName = `assistant-ia-v${version}.tar.gz`;
   const archivePath = path.join(exportRoot, archiveName);
 
   const excludeArgs = exportExcludes.map((entry) => `--exclude=${entry}`);
 
-  // L'archive doit contenir un dossier "fablab-ai/" au sommet (pas de fichiers
+  // L'archive doit contenir un dossier "assistant-ia/" au sommet (pas de fichiers
   // en vrac, et surtout pas "workspace/" : workspaceDir vaut toujours
   // "/workspace" a l'interieur du conteneur, peu importe le nom reel du
   // dossier hote). --transform renomme le prefixe "./" en "composeProjectName/"
@@ -1645,13 +1643,13 @@ async function buildExportArchive(version) {
 // Reconstruit un .zip identique au .tar.gz deja construit (memes exclusions,
 // deja appliquees dans l'archive) : extraction dans un dossier temporaire
 // puis rezippage, pour ne pas dupliquer la liste d'exclusions. Sert au fichier
-// "derniere version" (fablab-ai.zip) attendu par l'installation web en une
+// "derniere version" (assistant-ia.zip) attendu par l'installation web en une
 // commande (irm ... | iex, voir web-install.ps1), qui n'a pas d'equivalent
 // tar.gz cote client Windows.
 async function buildExportZip(exportRoot, archivePath, version) {
-  const zipName = `fablab-ai-v${version}.zip`;
+  const zipName = `assistant-ia-v${version}.zip`;
   const zipPath = path.join(exportRoot, zipName);
-  const stagingDir = await fsp.mkdtemp(path.join(os.tmpdir(), "fablab-zip-"));
+  const stagingDir = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-zip-"));
 
   try {
     await new Promise((resolve, reject) => {
@@ -1793,17 +1791,17 @@ async function runExportPublishInBackground({ version, notes, ftpConfigOverride 
     await uploadFileViaFtps(path.join(exportRoot, "release-notes.txt"), `${remoteBase}/release-notes.txt`, ftpConfig);
     pushDeployLog("Notes de version envoyees.");
 
-    // Copie "derniere version" sous un nom fixe (fablab-ai.zip), toujours au meme
+    // Copie "derniere version" sous un nom fixe (assistant-ia.zip), toujours au meme
     // endroit et toujours ecrasee : c'est ce que telecharge l'installation web en
     // une commande (irm ... | iex), qui n'a aucun moyen de connaitre le numero de
     // version a l'avance et ne doit jamais avoir a etre mise a jour manuellement.
     const latestZipDir = ftpConfig.latestZipDir || path.posix.dirname(`/${ftpConfig.remoteDir}`).replace(/^\/+/, "");
     if (latestZipDir && latestZipDir !== ".") {
-      await uploadFileViaFtps(zipPath, `ftp://${ftpConfig.host}/${latestZipDir}/fablab-ai.zip`, ftpConfig);
-      pushDeployLog(`fablab-ai.zip mis a jour dans ${latestZipDir}/ (toujours la derniere version).`);
+      await uploadFileViaFtps(zipPath, `ftp://${ftpConfig.host}/${latestZipDir}/assistant-ia.zip`, ftpConfig);
+      pushDeployLog(`assistant-ia.zip mis a jour dans ${latestZipDir}/ (toujours la derniere version).`);
     } else {
       pushDeployLog(
-        "Attention : impossible de determiner le dossier de fablab-ai.zip (DEPLOY_FTP_REMOTE_DIR trop court) - non mis a jour."
+        "Attention : impossible de determiner le dossier de assistant-ia.zip (DEPLOY_FTP_REMOTE_DIR trop court) - non mis a jour."
       );
     }
 

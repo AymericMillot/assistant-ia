@@ -12,7 +12,7 @@ function buildDefaultNotes(version) {
 // Persiste le brouillon de note (auto-genere ou modifie a la main) dans le
 // navigateur : un rechargement de la page (ou une fermeture d'onglet avant
 // publication) ne doit ni le perdre, ni regenerer un nouvel horodatage.
-const NOTES_DRAFT_STORAGE_KEY = "fablab-admin-deployment-notes-draft";
+const NOTES_DRAFT_STORAGE_KEY = "assistant-ia-admin-deployment-notes-draft";
 
 function loadNotesDraft(version) {
   try {

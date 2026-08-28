@@ -120,7 +120,7 @@ apply_remote_package_from_host() {
     "backend/data"
     ".git"
     ".update-backups"
-    "fablab-admin-cookie.txt"
+    "assistant-ia-admin-cookie.txt"
     "export"
     "release"
   )

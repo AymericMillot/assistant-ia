@@ -51,7 +51,7 @@ export function initializeDatabase() {
     return dbInstance;
   }
 
-  const sqlitePath = resolveRuntimePath(process.env.SQLITE_PATH || "./data/fablab.sqlite");
+  const sqlitePath = resolveRuntimePath(process.env.SQLITE_PATH || "./data/assistant-ia.sqlite");
   fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
 
   dbInstance = new Database(sqlitePath);
@@ -384,7 +384,7 @@ export function initializeDatabase() {
   // hash bcrypt generes par install.sh) avec le role "owner" : c'est le
   // compte de depart pour gerer ensuite d'autres comptes admin locaux.
   ensureAdminUser(
-    process.env.ADMIN_EMAIL || "admin@fablab.local",
+    process.env.ADMIN_EMAIL || "admin@assistant-ia.local",
     process.env.ADMIN_PASSWORD_HASH || "",
     "administrator"
   );

@@ -36,7 +36,7 @@ chmod +x *.sh
 
 ### Option B — archive d'une release (`wget`)
 
-Les archives de release portent la version dans leur nom (`fablab-ai-v<version>.tar.gz`) : il
+Les archives de release portent la version dans leur nom (`assistant-ia-v<version>.tar.gz`) : il
 n'existe **pas** d'URL « latest » stable pour `wget`. Récupérez d'abord le numéro de version,
 puis l'archive correspondante :
 
@@ -44,9 +44,9 @@ puis l'archive correspondante :
 sudo apt-get update && sudo apt-get install -y curl tar rsync
 repo=AymericMillot/assistant-ia
 ver=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | sed 's/.*"v\{0,1\}\([^"]*\)"$/\1/')
-wget "https://github.com/$repo/releases/download/v$ver/fablab-ai-v$ver.tar.gz"
-tar -xzf "fablab-ai-v$ver.tar.gz"
-cd fablab-ai
+wget "https://github.com/$repo/releases/download/v$ver/assistant-ia-v$ver.tar.gz"
+tar -xzf "assistant-ia-v$ver.tar.gz"
+cd assistant-ia
 chmod +x *.sh
 ./install.sh --non-interactive
 ```
@@ -143,7 +143,7 @@ interventions non interactives car il accepte les corrections proposées.
 ./update.sh                # applique la mise à jour distante, ou reconstruit localement à défaut
 ```
 
-Le mécanisme complet (GitHub Releases, manifest SHA-256, `preservePaths`) est décrit dans
+Le mécanisme complet (GitHub Releases, SHA-256 dans la description de la release, `preservePaths`) est décrit dans
 [GITHUB_RELEASES.md](GITHUB_RELEASES.md). Points clés :
 
 - le dépôt de `update.config.json` (`repository`) doit **exister, être public et porter ce nom

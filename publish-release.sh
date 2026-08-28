@@ -41,7 +41,7 @@ echo "==> Construction des archives $VERSION"
 
 # Doit rester aligne avec PACKAGE_BASENAME de export.sh et packageFileTemplate
 # de update.config.json.
-PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-fablab-ai}"
+PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-assistant-ia}"
 ARCHIVE="$ROOT_DIR/export/$VERSION/${PACKAGE_BASENAME}-v$VERSION.tar.gz"
 if [[ ! -f "$ARCHIVE" ]]; then
   echo "Archive attendue introuvable : $ARCHIVE" >&2

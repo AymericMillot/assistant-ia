@@ -5,7 +5,7 @@
 .env.*.local
 !.env.example
 !.env.publish.example
-fablab-admin-cookie.txt
+assistant-ia-admin-cookie.txt
 *.pem
 *.key
 *.crt

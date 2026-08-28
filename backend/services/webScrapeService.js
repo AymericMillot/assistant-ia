@@ -13,8 +13,8 @@ const scrapeTimeoutMs = Number(process.env.WEB_SCRAPE_TIMEOUT_MS || 20000);
 const scrapeMaxBytes = Number(process.env.WEB_SCRAPE_MAX_BYTES || 3 * 1024 * 1024);
 const scrapeMaxChars = Number(process.env.WEB_SCRAPE_MAX_CHARS || 200000);
 const scrapeUserAgent =
-  process.env.WEB_SCRAPE_USER_AGENT || "FablabAI-Assistant/1.0 (indexation documentaire interne)";
-// Par defaut, les adresses privees sont refusees (protection SSRF). Un FabLab
+  process.env.WEB_SCRAPE_USER_AGENT || "Assistant IA-Assistant/1.0 (indexation documentaire interne)";
+// Par defaut, les adresses privees sont refusees (protection SSRF). Un atelier
 // disposant d'une documentation intranet peut l'autoriser explicitement.
 const allowPrivateTargets = process.env.WEB_SCRAPE_ALLOW_PRIVATE === "1";
 

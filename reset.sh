@@ -83,11 +83,11 @@ docker_compose run --rm --no-deps backend \
 echo "Arret des services..."
 docker_compose down
 
-# Emplacement de la base SQLite : par defaut backend/data/fablab.sqlite,
+# Emplacement de la base SQLite : par defaut backend/data/assistant-ia.sqlite,
 # ajustable via SQLITE_PATH dans .env (chemin resolu comme cote backend,
 # relatif au dossier backend/).
 SQLITE_PATH_VALUE="$(get_env_value "SQLITE_PATH")"
-SQLITE_RELATIVE_PATH="${SQLITE_PATH_VALUE:-./data/fablab.sqlite}"
+SQLITE_RELATIVE_PATH="${SQLITE_PATH_VALUE:-./data/assistant-ia.sqlite}"
 if [[ "$SQLITE_RELATIVE_PATH" = /* ]]; then
   SQLITE_HOST_PATH="$SQLITE_RELATIVE_PATH"
 else
@@ -99,7 +99,7 @@ rm -f "$SQLITE_HOST_PATH" "$SQLITE_HOST_PATH-wal" "$SQLITE_HOST_PATH-shm"
 rm -f "$ROOT_DIR/backend/data/branding.json"
 rm -f "$ROOT_DIR/backend/data/setup-token"
 rm -f "$ROOT_DIR/backend/data/deployment.json"
-rm -f "$ROOT_DIR/fablab-admin-cookie.txt"
+rm -f "$ROOT_DIR/assistant-ia-admin-cookie.txt"
 
 if [[ -d "$ROOT_DIR/backend/uploads" ]]; then
   find "$ROOT_DIR/backend/uploads" -mindepth 1 -delete

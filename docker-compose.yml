@@ -1,7 +1,13 @@
+# Nom de projet Compose fige : sans lui, Docker le derive du nom du dossier
+# courant, ce qui desynchroniserait le "docker compose" de install.sh/update.sh
+# du "docker compose -p assistant-ia" lance par le conteneur updater (deux piles
+# distinctes). Doit rester aligne avec UPDATE_PROJECT_NAME du service updater.
+name: assistant-ia
+
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: fablab-ollama
+    container_name: assistant-ia-ollama
     restart: unless-stopped
     # Aucun port publie sur l'hote : accessible uniquement via le reseau
     # Docker interne (les autres services y accedent par le nom "ollama").
@@ -20,7 +26,7 @@ services:
 
   chromadb:
     image: chromadb/chroma:latest
-    container_name: fablab-chromadb
+    container_name: assistant-ia-chromadb
     restart: unless-stopped
     # Aucun port publie sur l'hote : accessible uniquement via le reseau
     # Docker interne (les autres services y accedent par le nom "chromadb").
@@ -39,7 +45,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: fablab-redis
+    container_name: assistant-ia-redis
     restart: unless-stopped
     # Aucun port publie sur l'hote : accessible uniquement via le reseau
     # Docker interne (les autres services y accedent par le nom "redis").
@@ -53,7 +59,7 @@ services:
     build:
       context: .
       dockerfile: ./backend/Dockerfile
-    container_name: fablab-backend
+    container_name: assistant-ia-backend
     restart: unless-stopped
     ports:
       - "${SERVER_BIND_HOST:-0.0.0.0}:${PORT:-3000}:${PORT:-3000}"
@@ -88,7 +94,7 @@ services:
       - frontend-dev
     build:
       context: ./frontend
-    container_name: fablab-frontend
+    container_name: assistant-ia-frontend
     restart: unless-stopped
     ports:
       - "${FRONTEND_DEV_PORT:-3001}:3000"
@@ -101,7 +107,7 @@ services:
   updater:
     build:
       context: ./updater
-    container_name: fablab-updater
+    container_name: assistant-ia-updater
     restart: unless-stopped
     volumes:
       - ${PROJECT_WORKSPACE_DIR:-.}/:/workspace
@@ -111,7 +117,7 @@ services:
       UPDATE_CONFIG_PATH: /workspace/update.config.json
       VERSION_FILE_PATH: /workspace/version.json
       UPDATE_PORT: 3010
-      UPDATE_PROJECT_NAME: fablab-ai
+      UPDATE_PROJECT_NAME: assistant-ia
       # Node 24 : fait passer fetch() (verification GitHub, telechargement des
       # releases) par HTTP(S)_PROXY / NO_PROXY s'ils sont definis dans .env.
       # Sans proxy configure, c'est un no-op. Indispensable derriere un proxy

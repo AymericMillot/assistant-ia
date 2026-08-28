@@ -67,9 +67,9 @@ SAFE_PROJECT_VERSION="$(printf "%s" "$PROJECT_VERSION" | tr -cs '[:alnum:]._+-' 
 # En CI (GitHub Actions), le depot est extrait dans un dossier portant le nom du
 # depot (ex: "assistant-ia") ; sans cette variable, export.sh produirait
 # "assistant-ia-v1.059.tar.gz" alors que update.config.json et le workflow
-# attendent "fablab-ai-v1.059.tar.gz". La valeur doit rester alignee avec
-# packageFileTemplate/manifestFileTemplate de update.config.json.
-PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-fablab-ai}"
+# attendent "assistant-ia-v1.059.tar.gz". La valeur doit rester alignee avec
+# packageFileTemplate de update.config.json.
+PACKAGE_BASENAME="${UPDATE_PROJECT_NAME:-assistant-ia}"
 ARCHIVE_NAME="${PACKAGE_BASENAME}-v${SAFE_PROJECT_VERSION}.tar.gz"
 ZIP_ARCHIVE_NAME="${PACKAGE_BASENAME}-v${SAFE_PROJECT_VERSION}.zip"
 VERSION_OUTPUT_DIR=""
@@ -158,7 +158,7 @@ release
 backend/node_modules
 frontend/node_modules
 updater/node_modules
-fablab-admin-cookie.txt
+assistant-ia-admin-cookie.txt
 .env
 .env.publish
 .env.local
@@ -183,8 +183,8 @@ ARCHIVE_PATH="$VERSION_OUTPUT_DIR/$ARCHIVE_NAME"
 ZIP_ARCHIVE_PATH="$VERSION_OUTPUT_DIR/$ZIP_ARCHIVE_NAME"
 NOTES_PATH="$VERSION_OUTPUT_DIR/$NOTES_FILE_NAME"
 
-# L'archive contient un dossier "$PROJECT_NAME/" au sommet (ex: "fablab-ai/") :
-# un "unzip fablab-ai.zip" ou "tar -xzf" cree directement ce dossier avec tout
+# L'archive contient un dossier "$PROJECT_NAME/" au sommet (ex: "assistant-ia/") :
+# un "unzip assistant-ia.zip" ou "tar -xzf" cree directement ce dossier avec tout
 # le projet dedans, plutot que d'eparpiller les fichiers dans le repertoire courant.
 tar -czf "$ARCHIVE_PATH" \
   --exclude-from="$TEMP_EXCLUDES_FILE" \

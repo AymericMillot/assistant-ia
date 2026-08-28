@@ -74,7 +74,7 @@ function slugify(value) {
 }
 
 function getCollectionName(folderName) {
-  return `fablab_${slugify(folderName)}`;
+  return `assistant_${slugify(folderName)}`;
 }
 
 let embeddingsInstanceModel = null;
@@ -300,7 +300,7 @@ async function isLikelyValidPdf(absolutePath) {
 }
 
 async function readPdfWithPdftotext(absolutePath) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fablab-pdf-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "assistant-ia-pdf-"));
   const outputPath = path.join(tempDir, "document.txt");
 
   try {

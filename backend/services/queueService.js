@@ -23,7 +23,7 @@ import {
   waitForAssistantPriorityWindow
 } from "./schedulerService.js";
 
-const queue = new Bull("fablab-assistant-queue", process.env.REDIS_URL || "redis://127.0.0.1:6379", {
+const queue = new Bull("assistant-ia-queue", process.env.REDIS_URL || "redis://127.0.0.1:6379", {
   defaultJobOptions: {
     removeOnComplete: 100,
     removeOnFail: 250

@@ -79,7 +79,7 @@ resolve_package_file_name() {
     return
   fi
 
-  printf "fablab-ai-v%s.tar.gz" "$version"
+  printf "assistant-ia-v%s.tar.gz" "$version"
 }
 
 sha256_file() {
@@ -136,7 +136,7 @@ tar \
   --exclude='logs' \
   --exclude='uploads' \
   --exclude='.env' \
-  --exclude='fablab-admin-cookie.txt' \
+  --exclude='assistant-ia-admin-cookie.txt' \
   -czf "$ARCHIVE_PATH" \
   -C "$PROJECT_DIR" \
   .

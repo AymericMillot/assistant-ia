@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranding } from "../hooks/useBranding";
 
-const themeStorageKey = "fablab-ai-theme";
+const themeStorageKey = "assistant-ia-theme";
 
 function getInitialTheme() {
   try {

@@ -15,40 +15,46 @@ du dépôt défini dans `update.config.json` (`server.repository`).
 
 ## Contenu d'une release valide
 
-Une release valide contient :
+Les **assets** d'une release contiennent uniquement le **code source** :
 
-- le tag `v<version>` (identique à `version.json`) ;
-- l'archive `fablab-ai-v<version>.tar.gz` ;
-- le manifest `fablab-ai-v<version>.manifest.json`, qui contient le `sha256` (64 hexadécimaux)
-  et `packageFile` ;
-- les notes `fablab-ai-v<version>.notes.md`.
+- `assistant-ia-v<version>.tar.gz`
+- `assistant-ia-v<version>.zip`
 
-Le préfixe `fablab-ai` provient de la variable `UPDATE_PROJECT_NAME` (voir plus bas) et **non**
-du nom du dossier. Il doit rester aligné avec `packageFileTemplate` / `manifestFileTemplate` de
-`update.config.json`.
+Le tag est de la forme `v<version>` (semver, identique à `version.json`). Le **SHA-256** de
+l'archive `.tar.gz` est publié **dans le corps (description) de la release**, sous la forme :
+
+```
+sha256 (assistant-ia-v<version>.tar.gz): <64 caractères hexadécimaux>
+```
+
+Il n'y a **pas** de fichier `.manifest.json` ni `.notes.md` en asset.
+
+Le préfixe `assistant-ia` provient de la variable `UPDATE_PROJECT_NAME` et **non** du nom du
+dossier. Il doit rester aligné avec `packageFileTemplate` de `update.config.json`.
 
 Le service de mise à jour **ignore** une release si :
 
-- le tag n'est pas de la forme `vX.Y` ; ou
+- le tag n'est pas de la forme `vX.Y.Z` ; ou
 - c'est un brouillon ou une prérelease ; ou
-- le manifest est absent, ou son `version` ne correspond pas au tag ; ou
-- le `sha256` du manifest n'a pas le format attendu (64 hexadécimaux) ; ou
-- l'archive nommée par le manifest est absente des assets.
+- l'archive `.tar.gz` du code source est absente des assets ; ou
+- `requireSha256` est `true` (par défaut) et aucune empreinte `sha256` de 64 hexadécimaux n'est
+  trouvée dans le corps de la release.
 
-À l'application, le SHA-256 de l'archive téléchargée est recalculé et comparé au manifest : toute
-divergence annule la mise à jour.
+À l'application, le SHA-256 de l'archive téléchargée est recalculé et comparé à celui publié
+dans la release : toute divergence annule la mise à jour.
 
 ## Publier une version
 
-1. Mettez à jour `version.json` et `release-notes.txt`.
+1. Mettez à jour `version.json` (`vX.X.X`) et `release-notes.txt`.
 2. Validez les changements dans un commit (l'arbre de travail doit être propre).
 3. Lancez `./publish-release.sh` (ou `./publish-release.sh --dry-run` pour vérifier sans taguer).
 
 Le script construit les archives, vérifie le SHA-256, puis crée et pousse le tag `v<version>`.
-Le workflow `.github/workflows/release.yml` crée alors la GitHub Release et y joint les quatre
-fichiers. Le workflow fixe `UPDATE_PROJECT_NAME: fablab-ai` : c'est indispensable car
-`actions/checkout` extrait le dépôt dans un dossier portant le nom du dépôt, et sans cette
-variable `export.sh` nommerait l'archive d'après ce nom.
+Le workflow `.github/workflows/release.yml` crée alors la GitHub Release, calcule le SHA-256,
+l'écrit dans le corps de la release et joint les deux archives du code source. Le workflow fixe
+`UPDATE_PROJECT_NAME: assistant-ia` : c'est indispensable car `actions/checkout` extrait le
+dépôt dans un dossier portant le nom du dépôt, et sans cette variable `export.sh` nommerait
+l'archive d'après ce nom.
 
 ## Appliquer une mise à jour
 
@@ -74,8 +80,8 @@ avec les fichiers locaux entre-temps.
 
 ```bash
 ./update.sh --check-only        # état du canal ; code de sortie ≠ 0 si la vérification a échoué
-./test-update-source.sh         # télécharge l'archive distante et vérifie son SHA-256, sans appliquer
-./doctor.sh --check-only        # rsync/curl/tar, accès au dépôt, releases publiées, fichiers root
+./test-update-source.sh         # télécharge l'archive du code source et vérifie le SHA-256 du corps de release
+./doctor.sh --check-only        # rsync/curl/tar/sha256, accès au dépôt, releases publiées, fichiers root
 ```
 
 `update.config.json` accepte un champ optionnel `server.apiBaseUrl` (vide par défaut) pour

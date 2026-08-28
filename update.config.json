@@ -5,8 +5,7 @@
     "apiBaseUrl": "",
     "latestReleaseUrl": "https://github.com/AymericMillot/assistant-ia/releases/latest",
     "releaseLayout": "github-releases",
-    "manifestFileTemplate": "fablab-ai-v{version}.manifest.json",
-    "packageFileTemplate": "fablab-ai-v{version}.tar.gz",
+    "packageFileTemplate": "assistant-ia-v{version}.tar.gz",
     "requireSha256": true,
     "headers": {}
   },
