@@ -7,13 +7,21 @@ const schedulerTimeZone = process.env.ACCESS_PASSWORD_TIMEZONE || "Europe/Paris"
 const attachmentCleanupIntervalMs = Number(
   process.env.ATTACHMENT_CLEANUP_INTERVAL_MS || 6 * 60 * 60 * 1000
 );
+const autoUpdateCheckMs = Number(process.env.AUTO_UPDATE_CHECK_MS || 60 * 1000);
+// Si l'assistant est occupe (chat en cours) au moment programme, on patiente
+// et on retente a chaque tick plutot que d'interrompre une conversation.
+// Passe ce delai, on abandonne pour aujourd'hui plutot que de risquer une
+// mise a jour tres tardive dans la journee.
+const autoUpdateMaxDeferMinutes = Number(process.env.AUTO_UPDATE_MAX_DEFER_MINUTES || 180);
 
 let lastActivityAt = Date.now();
 let activeChatCount = 0;
 let activeInteractiveRequestCount = 0;
 let schedulerInterval = null;
 let attachmentCleanupInterval = null;
+let autoUpdateInterval = null;
 let schedulerCheckInFlight = false;
+let autoUpdateCheckInFlight = false;
 let lastPriorityWaitLogAt = 0;
 
 function sleep(ms) {
@@ -152,6 +160,107 @@ async function maybeScheduleSmartAutoIndex() {
   }
 }
 
+// Heure et date locales dans le fuseau du scheduler, sans dependance externe.
+function getZonedDateAndTime(timeZone) {
+  const parts = new Intl.DateTimeFormat("fr-FR", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(new Date());
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    date: `${map.year}-${map.month}-${map.day}`,
+    time: `${map.hour}:${map.minute}`
+  };
+}
+
+function minutesSinceMidnight(hhmm) {
+  const [hours, minutes] = String(hhmm || "0:0").split(":").map(Number);
+  return (hours || 0) * 60 + (minutes || 0);
+}
+
+async function maybeRunScheduledUpdate() {
+  if (autoUpdateCheckInFlight) {
+    return;
+  }
+
+  autoUpdateCheckInFlight = true;
+
+  try {
+    const [{ getSetting, setSetting, insertAuditLogEntry }, updateServiceModule] = await Promise.all([
+      import("../config/db.js"),
+      import("./updateService.js")
+    ]);
+
+    if (getSetting("autoUpdateEnabled", "false") !== "true") {
+      return;
+    }
+
+    const scheduledTime = getSetting("autoUpdateTime", "03:00");
+    const { date: today, time: currentTime } = getZonedDateAndTime(schedulerTimeZone);
+
+    if (getSetting("lastAutoUpdateRunDate", "") === today) {
+      return;
+    }
+
+    if (minutesSinceMidnight(currentTime) < minutesSinceMidnight(scheduledTime)) {
+      return;
+    }
+
+    if (isAssistantBusy()) {
+      const deferredMinutes = minutesSinceMidnight(currentTime) - minutesSinceMidnight(scheduledTime);
+      if (deferredMinutes > autoUpdateMaxDeferMinutes) {
+        setSetting("lastAutoUpdateRunDate", today);
+        logger.warn(
+          "Mise a jour automatique annulee pour aujourd'hui : assistant reste occupe trop longtemps.",
+          { scheduledTime, timeZone: schedulerTimeZone, deferredMinutes }
+        );
+      }
+      return;
+    }
+
+    // Marque la journee comme traitee avant meme de verifier la disponibilite
+    // d'une mise a jour, pour ne jamais retenter plusieurs fois dans le meme
+    // creux (une verification "aucune mise a jour" ne doit pas boucler).
+    setSetting("lastAutoUpdateRunDate", today);
+
+    const status = await updateServiceModule.getUpdateStatus();
+    if (!status?.updateAvailable) {
+      logger.info("Mise a jour automatique : aucune nouvelle version disponible.", {
+        scheduledTime,
+        timeZone: schedulerTimeZone
+      });
+      return;
+    }
+
+    logger.info("Declenchement de la mise a jour automatique programmee.", {
+      scheduledTime,
+      timeZone: schedulerTimeZone,
+      targetVersion: status.latestVersion
+    });
+
+    await updateServiceModule.applyUpdate();
+    insertAuditLogEntry({
+      actorRole: "system",
+      action: "update.apply.scheduled",
+      targetType: "version",
+      targetId: status.latestVersion || null,
+      details: { scheduledTime, timeZone: schedulerTimeZone }
+    });
+  } catch (error) {
+    logger.error("Erreur pendant la mise a jour automatique programmee.", {
+      message: error.message
+    });
+  } finally {
+    autoUpdateCheckInFlight = false;
+  }
+}
+
 async function runAttachmentCleanup() {
   try {
     const { cleanupExpiredAttachments } = await import("./attachmentService.js");
@@ -188,6 +297,18 @@ export function initializeSchedulerService() {
   // un passage au demarrage puis un controle periodique.
   runAttachmentCleanup();
   attachmentCleanupInterval = setInterval(runAttachmentCleanup, attachmentCleanupIntervalMs);
+
+  if (autoUpdateInterval) {
+    clearInterval(autoUpdateInterval);
+  }
+
+  autoUpdateInterval = setInterval(() => {
+    maybeRunScheduledUpdate().catch((error) => {
+      logger.error("Erreur du scheduler de mise a jour automatique.", {
+        message: error.message
+      });
+    });
+  }, autoUpdateCheckMs);
 }
 
 export function shutdownSchedulerService() {
@@ -199,6 +320,11 @@ export function shutdownSchedulerService() {
   if (attachmentCleanupInterval) {
     clearInterval(attachmentCleanupInterval);
     attachmentCleanupInterval = null;
+  }
+
+  if (autoUpdateInterval) {
+    clearInterval(autoUpdateInterval);
+    autoUpdateInterval = null;
   }
 
   activeChatCount = 0;
