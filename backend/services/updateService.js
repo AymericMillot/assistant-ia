@@ -4,6 +4,10 @@ import { getCurrentVersion } from "./appInfoService.js";
 import { getSetting, getSettingDecrypted } from "../config/db.js";
 
 const updaterBaseUrl = process.env.UPDATER_URL || "http://updater:3010";
+// Jeton partage : authentifie le backend aupres de l'updater sur le reseau
+// Docker interne (voir requireSharedToken cote updater). Optionnel pour rester
+// compatible avec les installations existantes.
+const updaterSharedToken = String(process.env.UPDATER_SHARED_TOKEN || "").trim();
 const updaterTimeoutMs = Number(process.env.UPDATER_TIMEOUT_MS || 12000);
 // L'updater redemarre son propre conteneur apres chaque mise a jour (voir
 // triggerDetachedComposeUpdate cote updater) : il est normal qu'il soit brievement
@@ -59,6 +63,7 @@ async function attemptRequester(pathname, options) {
       const response = await fetch(`${updaterBaseUrl}${candidatePath}`, {
         headers: {
           "Content-Type": "application/json",
+          ...(updaterSharedToken ? { Authorization: `Bearer ${updaterSharedToken}` } : {}),
           ...(options.headers || {})
         },
         ...options,

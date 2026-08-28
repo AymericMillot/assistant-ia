@@ -164,28 +164,36 @@ require_docker() {
 # Outils systeme utilises par l'application d'un package distant
 # (apply_remote_package_from_host dans update.sh, install_requested_version
 # dans install.sh) : tar/gzip pour l'archive, curl pour le telechargement,
-# rsync pour la synchronisation atomique de l'arborescence. Les images cloud
-# Debian/Ubuntu minimales et Alpine n'embarquent PAS rsync par defaut, d'ou
-# ce controle explicite avec une piste d'installation.
+# rsync pour la synchronisation atomique de l'arborescence, et un outil de
+# hachage SHA-256 (sha256sum OU shasum) pour verifier l'integrite du package.
+# Les images cloud Debian/Ubuntu minimales et Alpine n'embarquent PAS rsync
+# par defaut ; certaines images tres reduites n'ont ni sha256sum ni shasum,
+# et sans controle explicite la verification echouerait avec un message
+# trompeur ("SHA256 verification failed") au lieu d'un diagnostic clair.
 require_host_update_tools() {
   local missing=()
   local tool
   for tool in curl tar gzip rsync; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    missing+=("sha256sum (ou shasum)")
+  fi
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
 
   echo "Outils systeme manquants pour la mise a jour : ${missing[*]}" >&2
+  local hint="${missing[*]}"
+  hint="${hint/sha256sum (ou shasum)/coreutils}"
   if command -v apt-get >/dev/null 2>&1; then
-    echo "  -> Installez-les : sudo apt-get update && sudo apt-get install -y ${missing[*]}" >&2
+    echo "  -> Installez-les : sudo apt-get update && sudo apt-get install -y ${hint}" >&2
   elif command -v dnf >/dev/null 2>&1; then
-    echo "  -> Installez-les : sudo dnf install -y ${missing[*]}" >&2
+    echo "  -> Installez-les : sudo dnf install -y ${hint}" >&2
   elif command -v apk >/dev/null 2>&1; then
-    echo "  -> Installez-les : sudo apk add ${missing[*]}" >&2
+    echo "  -> Installez-les : sudo apk add ${hint}" >&2
   elif command -v brew >/dev/null 2>&1; then
-    echo "  -> Installez-les : brew install ${missing[*]}" >&2
+    echo "  -> Installez-les : brew install ${hint}" >&2
   fi
   exit 1
 }

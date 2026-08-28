@@ -223,6 +223,120 @@ else
   fi
 fi
 
+# Outil de hachage SHA-256 : sans lui, update.sh/install.sh --vX ne peuvent pas
+# verifier l'integrite du package et abandonnent avec un message trompeur.
+if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+  say_ok "Un outil SHA-256 est disponible (sha256sum ou shasum)."
+else
+  say_fail "Ni 'sha256sum' ni 'shasum' : ./update.sh et ./install.sh --vX.XXX ne pourront pas verifier l'integrite des packages."
+  command -v apt-get >/dev/null 2>&1 && echo "  -> sudo apt-get install -y coreutils"
+  command -v apk    >/dev/null 2>&1 && echo "  -> sudo apk add coreutils"
+fi
+
+# 'git' : ./update.sh preserve .git et le flux recommande est 'git pull'.
+if [[ -d "$ROOT_DIR/.git" ]] && ! command -v git >/dev/null 2>&1; then
+  say_warn "Le projet est un depot git mais 'git' n'est pas installe : 'git pull' et la preservation propre de .git lors des mises a jour sont compromises."
+fi
+
+# Fins de ligne Windows (CRLF) : un checkout/dezippage sous Windows casse tous
+# les scripts (shebang "bash\r", heredocs, set -e...).
+crlf_hits="$(grep -rlU "$(printf '\r')" "$ROOT_DIR"/*.sh 2>/dev/null || true)"
+if [[ -n "$crlf_hits" ]]; then
+  say_fail "Des scripts .sh contiennent des fins de ligne Windows (CRLF) : ils echoueront de facon imprevisible."
+  echo "  Fichiers : $(echo "$crlf_hits" | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+  if confirm "Convertir ces scripts en fins de ligne Unix (LF) ?"; then
+    fixed_all=1
+    while IFS= read -r crlf_file; do
+      [[ -z "$crlf_file" ]] && continue
+      if command -v sed >/dev/null 2>&1 && sed -i 's/\r$//' "$crlf_file" 2>/dev/null; then :; else fixed_all=0; fi
+    done <<< "$crlf_hits"
+    if [[ "$fixed_all" -eq 1 ]]; then
+      undo_last_fail
+      say_fixed "Scripts reconvertis en fins de ligne Unix."
+    else
+      say_fail "Conversion CRLF incomplete : lancez 'sed -i \"s/\\r\$//\" *.sh'."
+    fi
+  fi
+fi
+
+# Bit executable sur les scripts (un unzip le perd souvent).
+non_exec_scripts=""
+for s in "$ROOT_DIR"/*.sh; do
+  [[ -f "$s" ]] || continue
+  [[ -x "$s" ]] || non_exec_scripts="$non_exec_scripts $(basename "$s")"
+done
+if [[ -n "${non_exec_scripts// }" ]]; then
+  say_warn "Scripts non executables :${non_exec_scripts}"
+  if confirm "Ajouter le bit executable (chmod +x *.sh) ?"; then
+    chmod +x "$ROOT_DIR"/*.sh 2>/dev/null && { undo_last_warn; say_fixed "Bit executable ajoute."; } || say_warn "chmod +x a echoue."
+  fi
+fi
+
+# Validite JSON de update.config.json et version.json (+ BOM UTF-8, qui casse
+# JSON.parse et 'node -p require').
+json_is_valid() {
+  local file="$1"
+  [[ -f "$file" ]] || return 2
+  if command -v node >/dev/null 2>&1; then
+    node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$file" >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$file" >/dev/null 2>&1
+  else
+    return 3
+  fi
+}
+for jf in update.config.json version.json; do
+  jpath="$ROOT_DIR/$jf"
+  if [[ ! -f "$jpath" ]]; then
+    [[ "$jf" == "version.json" ]] && say_warn "$jf absent (une version 1.000 sera supposee)." \
+                                  || say_warn "$jf absent : ./update.sh ne verifiera pas de mise a jour distante."
+    continue
+  fi
+  if [[ "$(head -c 3 "$jpath" | od -An -tx1 2>/dev/null | tr -d ' \n')" == "efbbbf" ]]; then
+    say_fail "$jf commence par un BOM UTF-8 : JSON.parse echouera. Reenregistrez le fichier en UTF-8 sans BOM."
+  fi
+  json_is_valid "$jpath"
+  case "$?" in
+    0) say_ok "$jf est un JSON valide." ;;
+    1) say_fail "$jf n'est pas un JSON valide : ./update.sh et le service de mise a jour ne fonctionneront pas. Corrigez la syntaxe." ;;
+    3) say_warn "Impossible de valider $jf (ni node ni python3)." ;;
+  esac
+done
+
+# Coherence de version.json (format X ou X.Y.Z...).
+version_str="$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$ROOT_DIR/version.json" 2>/dev/null | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
+if [[ -n "$version_str" && ! "$version_str" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+  say_warn "version.json annonce une version non numerique ('$version_str') : le tri des releases et la comparaison de versions peuvent se comporter de facon inattendue."
+fi
+
+# preservePaths de update.config.json : doit couvrir .env et backend/data.
+# (Le service updater applique de toute facon un socle non negociable, mais un
+# update.config.json incomplet reste un signal d'alerte.)
+if [[ -f "$ROOT_DIR/update.config.json" ]]; then
+  pp_line="$(tr -d '\n' < "$ROOT_DIR/update.config.json" | grep -o '"preservePaths"[[:space:]]*:[[:space:]]*\[[^]]*\]' || true)"
+  if [[ -n "$pp_line" ]]; then
+    for must in ".env" "backend/data"; do
+      printf '%s' "$pp_line" | grep -q "\"$must\"" || \
+        say_warn "update.config.json : apply.preservePaths ne mentionne pas \"$must\". Une mise a jour lancee en ligne de commande s'appuie sur cette liste ; completez-la."
+    done
+  else
+    say_warn "update.config.json : apply.preservePaths est absent ou vide. ./update.sh utilise sa propre liste de securite, mais corrigez la configuration."
+  fi
+fi
+
+# Proxy sortant : si HTTP(S)_PROXY est defini (site derriere un proxy), le
+# conteneur updater doit router fetch() a travers (NODE_USE_ENV_PROXY=1, deja
+# fixe dans docker-compose.yml). On le rappelle et on testera l'acces reel plus
+# bas (section "Serveur de mise a jour distant").
+proxy_env="$(get_env_value HTTPS_PROXY)$(get_env_value HTTP_PROXY)${HTTPS_PROXY:-}${HTTP_PROXY:-}"
+if [[ -n "$proxy_env" ]]; then
+  if grep -q 'NODE_USE_ENV_PROXY' "$ROOT_DIR/docker-compose.yml" 2>/dev/null; then
+    say_ok "Proxy sortant configure et docker-compose.yml fixe NODE_USE_ENV_PROXY pour l'updater."
+  else
+    say_warn "Un proxy sortant est configure mais docker-compose.yml ne fixe pas NODE_USE_ENV_PROXY=1 pour l'updater : la verification des mises a jour risque d'echouer."
+  fi
+fi
+
 # Fichiers du projet appartenant a root (Linux) : symptome d'une mise a jour
 # lancee depuis l'interface web (le conteneur updater ecrit dans l'arborescence
 # en tant que root). Les commandes git / ./update.sh de l'utilisateur echouent
@@ -627,6 +741,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say_step "Coherence version <-> conteneurs"
+
+# Si une mise a jour a synchronise les fichiers puis que "docker compose up
+# --build" a echoue, version.json (monte en lecture seule dans le backend)
+# annonce la nouvelle version alors que l'image backend contient encore
+# l'ancien code. On compare la date de creation de l'image backend a la date
+# de derniere modification de version.json.
+version_file="$ROOT_DIR/version.json"
+disk_version="$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$version_file" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+backend_image="$(docker inspect --format '{{.Image}}' fablab-backend 2>/dev/null || true)"
+if [[ -z "$backend_image" ]]; then
+  say_warn "Conteneur backend absent : impossible de verifier la coherence de version (demarrez le projet)."
+else
+  image_created_iso="$(docker image inspect "$backend_image" --format '{{.Created}}' 2>/dev/null || true)"
+  # Epoch de l'image (GNU date sur Linux, BSD date sur macOS).
+  image_epoch="$(date -d "$image_created_iso" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${image_created_iso%%.*}" +%s 2>/dev/null || echo 0)"
+  version_epoch="$(stat -c %Y "$version_file" 2>/dev/null || stat -f %m "$version_file" 2>/dev/null || echo 0)"
+  # 120 s de marge : lors d'une mise a jour reussie, l'image est reconstruite
+  # juste apres l'ecriture de version.json.
+  if [[ "$image_epoch" -gt 0 && "$version_epoch" -gt 0 && $((version_epoch - image_epoch)) -gt 120 ]]; then
+    say_fail "version.json (${disk_version:-?}) est plus recent que l'image backend : une mise a jour a ete appliquee sur disque sans reconstruction des conteneurs."
+    echo "  -> Terminez la mise a jour : ./update.sh   (elle reconstruira le backend avec les fichiers actuels)"
+    echo "  -> Ou revenez en arriere depuis l'onglet Mises a jour de l'administration."
+  else
+    say_ok "L'image backend correspond a la version presente sur disque (${disk_version:-inconnue})."
+  fi
+fi
+
+# Etat residuel d'une mise a jour interrompue cote updater (si le conteneur
+# n'a pas redemarre depuis).
+updater_state="$(docker exec fablab-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true)"
+if [[ -n "$updater_state" ]]; then
+  updater_status="$(printf '%s' "$updater_state" | grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+  if [[ "$updater_status" == "error" ]]; then
+    recover_id="$(printf '%s' "$updater_state" | grep -o '"recoverableBackupId"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    if [[ -n "$recover_id" ]]; then
+      say_warn "La derniere mise a jour a echoue apres avoir synchronise les fichiers. Relancez ./update.sh, ou restaurez la sauvegarde ${recover_id} depuis l'administration."
+    else
+      say_warn "La derniere mise a jour signalee par l'updater s'est terminee en erreur. Consultez l'onglet Mises a jour de l'administration."
+    fi
+  fi
+fi
+
+# Le dossier des sauvegardes de rollback doit exister et etre inscriptible :
+# sinon une mise a jour distante echoue au moment de creer le point de retour.
+backups_dir="$ROOT_DIR/.update-backups"
+if [[ -e "$backups_dir" && ! -w "$backups_dir" ]]; then
+  say_fail ".update-backups n'est pas inscriptible : une mise a jour distante ne pourra pas creer de sauvegarde de rollback."
+  echo "  -> sudo chown -R \$(id -u):\$(id -g) $backups_dir"
+else
+  say_ok "Le dossier de sauvegardes de rollback est utilisable."
+fi
+
+# Marge disque pour appliquer une mise a jour : il faut de la place pour
+# l'archive + son extraction + une sauvegarde complete (~3x l'arborescence
+# hors donnees). Reference approximative : 300 Mo.
+update_fs_kb="$(df -Pk "$ROOT_DIR" 2>/dev/null | tail -1 | awk '{print $4}')"
+if [[ -n "${update_fs_kb:-}" && "$update_fs_kb" -lt 300000 ]]; then
+  say_warn "Moins de ~300 Mo libres sur la partition du projet : une mise a jour distante (archive + extraction + sauvegarde) peut echouer par manque d'espace."
+fi
+
+# ---------------------------------------------------------------------------
 say_step "Serveur de mise a jour distant"
 
 update_config_file="$ROOT_DIR/update.config.json"
@@ -677,6 +853,22 @@ else
           ;;
       esac
       rm -f "$releases_body_file"
+
+      # Test de l'acces reel DEPUIS le conteneur updater (c'est lui qui fait la
+      # requete en production, pas l'hote) : detecte un blocage reseau/proxy
+      # propre au conteneur meme quand l'hote, lui, joint GitHub.
+      if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx fablab-updater; then
+        updater_gh_code="$(docker exec fablab-updater sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Accept: application/vnd.github+json" '"${update_api_base}/repos/${update_repository}/releases?per_page=1"'' 2>/dev/null || echo "000")"
+        if [[ "$updater_gh_code" == "200" ]]; then
+          say_ok "Le conteneur updater atteint l'API GitHub."
+        elif [[ "$releases_http" == "200" ]]; then
+          say_fail "L'hote atteint GitHub mais PAS le conteneur updater (HTTP ${updater_gh_code}) : proxy/reseau Docker."
+          echo "  -> Si un proxy est requis, renseignez HTTPS_PROXY/HTTP_PROXY/NO_PROXY dans .env puis ./restart.sh"
+          echo "     (docker-compose.yml fixe deja NODE_USE_ENV_PROXY=1 pour l'updater)."
+        else
+          say_warn "Le conteneur updater n'atteint pas l'API GitHub (HTTP ${updater_gh_code})."
+        fi
+      fi
     fi
   elif curl -sf --max-time 5 -o /dev/null "$update_base_url" 2>/dev/null || curl -sf --max-time 5 -o /dev/null "${update_base_url%/}/version.json" 2>/dev/null; then
     say_ok "Serveur de mise a jour distant joignable (${update_base_url})."

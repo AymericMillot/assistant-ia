@@ -1,8 +1,21 @@
-Version 1.059 — audit de fiabilité et préparation au déploiement Linux (27 août 2026).
+Version 1.0.0 — première version publique de référence (28 août 2026).
 
-- secrets locaux sécurisés, synchronisables et exclus des exports ;
-- diagnostic `doctor.sh` renforcé (secrets, permissions, SQLite, services et ancien accès faible) ;
-- images Docker reproductibles, healthchecks et profil frontend de développement corrigé ;
-- dépendances actualisées : aucune vulnérabilité npm connue dans les trois applications ;
-- limites d'upload et d'import Excel, WebSocket authentifié et opérations techniques restreintes ;
-- parcours utilisateur et documentation de déploiement clarifiés.
+Assistant IA local basé sur du RAG, générique et configurable pour toute
+organisation (marque, périmètre thématique et serveur de mise à jour propres
+à chaque instance). Déploiement 100 % Docker : backend Express, frontend
+React servi en statique, Ollama, ChromaDB, Redis et un service updater.
+
+Points clés de cette première version :
+
+- installation Linux/macOS documentée (git clone ou archive), install.sh
+  génère .env et les secrets, tire les modèles Ollama et démarre la pile ;
+- canal de mise à jour GitHub Releases : manifest signé SHA-256 obligatoire,
+  brouillons et préreleases ignorés, refus des versions inférieures ;
+- application d'une mise à jour avec point de rollback automatique et
+  préservation non négociable de .env, backend/data, backend/uploads,
+  backend/logs et update.config.json ;
+- prise en charge d'un proxy sortant d'établissement (NODE_USE_ENV_PROXY) ;
+- doctor.sh : diagnostic de bout en bout (Docker, secrets, permissions,
+  SQLite, services, modèles, outils système, cohérence version/conteneurs,
+  fins de ligne, accès au dépôt de mises à jour depuis l'hôte et le conteneur) ;
+- authentification par comptes nommés (bcrypt), administration protégée par JWT.

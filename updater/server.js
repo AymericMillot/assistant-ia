@@ -11,6 +11,38 @@ import { spawn } from "child_process";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// Jeton partage backend <-> updater. L'updater n'est pas publie sur l'hote mais
+// reste joignable par tous les conteneurs du reseau Docker interne : si l'un
+// d'eux (Ollama, ChromaDB...) est compromis, il pourrait piloter les operations
+// privilegiees de l'updater (acces a docker.sock). Quand UPDATER_SHARED_TOKEN
+// est defini, les routes qui modifient l'etat exigent ce jeton. Absent =
+// comportement historique (compatibilite avec les installations existantes).
+const updaterSharedToken = String(process.env.UPDATER_SHARED_TOKEN || "").trim();
+
+function timingSafeEqualStrings(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function requireSharedToken(req, res, next) {
+  if (!updaterSharedToken) {
+    return next();
+  }
+
+  const header = String(req.headers.authorization || "");
+  const provided = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+
+  if (provided && timingSafeEqualStrings(provided, updaterSharedToken)) {
+    return next();
+  }
+
+  return res.status(401).json({ message: "Jeton de service de mise a jour invalide." });
+}
+
 const workspaceDir = process.env.UPDATE_WORKSPACE_DIR || "/workspace";
 const updateConfigPath = process.env.UPDATE_CONFIG_PATH || path.join(workspaceDir, "update.config.json");
 const versionFilePath = process.env.VERSION_FILE_PATH || path.join(workspaceDir, "version.json");
@@ -171,20 +203,37 @@ function compareVersions(left, right) {
   return 0;
 }
 
+const DEFAULT_UPDATE_CONFIG = {
+  server: {
+    baseUrl: "",
+    versionFile: "version.json",
+    packageFile: "fablab-ai-update.tar.gz",
+    notesFile: "release-notes.txt",
+    headers: {}
+  },
+  apply: {
+    services: ["backend", "frontend", "updater"],
+    preservePaths: [".env", "update.config.json", "backend/uploads", "backend/logs", "backend/data"]
+  }
+};
+
 async function readUpdateConfig() {
-  return readJson(updateConfigPath, {
-    server: {
-      baseUrl: "",
-      versionFile: "version.json",
-      packageFile: "fablab-ai-update.tar.gz",
-      notesFile: "release-notes.txt",
-      headers: {}
-    },
-    apply: {
-      services: ["backend", "frontend", "updater"],
-      preservePaths: [".env", "update.config.json", "backend/uploads", "backend/logs", "backend/data"]
-    }
-  });
+  // Distingue "fichier absent" (defauts silencieux, OK) de "fichier present
+  // mais JSON invalide" : dans ce dernier cas on le signale explicitement au
+  // lieu de retomber en silence sur des defauts qui produiront plus loin un
+  // message trompeur ("aucune URL de base configuree").
+  let raw;
+  try {
+    raw = await fsp.readFile(updateConfigPath, "utf8");
+  } catch {
+    return DEFAULT_UPDATE_CONFIG;
+  }
+  try {
+    const parsed = JSON.parse(raw.replace(/^﻿/, ""));
+    return parsed && typeof parsed === "object" ? parsed : DEFAULT_UPDATE_CONFIG;
+  } catch (error) {
+    throw new Error(`update.config.json est illisible (JSON invalide) : ${error.message}`);
+  }
 }
 
 function joinUrl(baseUrl, targetPath) {
@@ -700,9 +749,24 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+// Socle de preservation NON NEGOCIABLE, applique a chaque niveau de syncTree
+// quel que soit le contenu de update.config.json (apply.preservePaths). Sans
+// ce garde-fou, un update.config.json avec "preservePaths": [] ou sans ce
+// champ effacerait .env, la base et les fichiers utilisateurs lors d'une
+// mise a jour lancee depuis l'interface d'administration.
+const MANDATORY_PRESERVED_PATHS = [
+  ".update-backups",
+  ".git",
+  ".env",
+  "update.config.json",
+  "backend/data",
+  "backend/uploads",
+  "backend/logs"
+];
+
 function isRuntimePreservedPath(relativePath) {
   const normalized = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  return [".update-backups", ".git"].includes(normalized);
+  return MANDATORY_PRESERVED_PATHS.includes(normalized);
 }
 
 function formatBackupId(date = new Date()) {
@@ -1111,14 +1175,18 @@ function invalidateRemoteReleaseCache() {
 
 async function buildStatus() {
   const currentVersion = await readVersion();
-  const updateConfig = await readUpdateConfig();
-  const latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
   setState({ currentVersion });
   await pruneOldBackups();
   const backups = await listBackups();
   const { visibleBackups } = splitBackupsForRetention(backups);
 
+  // readUpdateConfig peut desormais lever (JSON invalide) : on l'inclut dans le
+  // meme try que la resolution distante pour degrader proprement en payload
+  // "warning" plutot qu'en 500.
+  let latestReleaseUrl = "";
   try {
+    const updateConfig = await readUpdateConfig();
+    latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
     const { release } = await fetchCachedRemoteReleaseInfo();
     const latestVersion = release.version || currentVersion;
     const updateAvailable = compareVersions(latestVersion, currentVersion) === 1;
@@ -1187,6 +1255,13 @@ async function applyUpdateInBackground(targetVersion = "") {
     logs: []
   });
   pushLog("Début de la procédure de mise à jour.");
+
+  // Suivi pour le diagnostic : si l'echec survient APRES syncTree (typiquement
+  // un "docker compose up --build" qui casse), le code sur disque est deja a
+  // jour mais les conteneurs tournent encore l'ancienne version. L'operateur
+  // doit alors soit relancer la mise a jour, soit revenir a la sauvegarde.
+  let filesSynced = false;
+  let rollbackBackupId = "";
 
   try {
     const requestedVersion = String(targetVersion || "").trim();
@@ -1274,6 +1349,7 @@ async function applyUpdateInBackground(targetVersion = "") {
       const packageRoot = await detectPackageRoot(extractRoot);
       await validatePackageRoot(packageRoot);
       const backup = await createWorkspaceBackup(currentVersion, config.apply?.preservePaths || []);
+      rollbackBackupId = backup.id;
       pushLog(`Sauvegarde de rollback créée (${backup.version}) dans ${backup.id}.`);
 
       const configuredServices = sanitizeServiceNames(config.apply?.services);
@@ -1287,6 +1363,7 @@ async function applyUpdateInBackground(targetVersion = "") {
       });
 
       await syncTree(packageRoot, workspaceDir, config.apply?.preservePaths || []);
+      filesSynced = true;
       pushLog("Nouveaux fichiers du projet synchronisés.");
 
       setState({
@@ -1344,15 +1421,25 @@ async function applyUpdateInBackground(targetVersion = "") {
       await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
     }
   } catch (error) {
+    let message = error.message;
+    if (filesSynced) {
+      // Les fichiers sont deja en place : seul le redemarrage/reconstruction a
+      // echoue. Ne pas laisser croire que rien n'a change.
+      message =
+        `${error.message} — Les nouveaux fichiers sont deja installes mais les conteneurs n'ont pas ete reconstruits. ` +
+        `Relancez la mise a jour pour reconstruire, ou restaurez la sauvegarde ${rollbackBackupId || "la plus recente"}.`;
+    }
     setState({
       busy: false,
       status: "error",
       progress: 100,
-      message: error.message,
-      error: error.message,
+      message,
+      error: message,
+      filesSynced,
+      recoverableBackupId: filesSynced ? rollbackBackupId : "",
       completedAt: new Date().toISOString()
     });
-    pushLog(`Erreur de mise à jour : ${error.message}`);
+    pushLog(`Erreur de mise à jour : ${message}`);
   }
 }
 
@@ -1787,7 +1874,7 @@ app.get("/releases", async (_req, res) => {
   }
 });
 
-app.post("/apply", async (req, res) => {
+app.post("/apply", requireSharedToken, async (req, res) => {
   if (state.busy) {
     return res.status(409).json({
       message: "Une mise à jour est déjà en cours.",
@@ -1822,7 +1909,7 @@ app.get("/backups", async (_req, res) => {
   });
 });
 
-app.post("/rollback", async (req, res) => {
+app.post("/rollback", requireSharedToken, async (req, res) => {
   if (state.busy) {
     return res.status(409).json({
       message: "Une mise à jour ou un rollback est déjà en cours.",
@@ -1860,7 +1947,7 @@ app.get("/export/status", async (_req, res) => {
   });
 });
 
-app.post("/export/publish", async (req, res) => {
+app.post("/export/publish", requireSharedToken, async (req, res) => {
   if (deployState.busy) {
     return res.status(409).json({
       message: "Un export est deja en cours.",

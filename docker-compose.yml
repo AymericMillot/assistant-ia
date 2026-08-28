@@ -112,6 +112,11 @@ services:
       VERSION_FILE_PATH: /workspace/version.json
       UPDATE_PORT: 3010
       UPDATE_PROJECT_NAME: fablab-ai
+      # Node 24 : fait passer fetch() (verification GitHub, telechargement des
+      # releases) par HTTP(S)_PROXY / NO_PROXY s'ils sont definis dans .env.
+      # Sans proxy configure, c'est un no-op. Indispensable derriere un proxy
+      # d'etablissement (cas frequent en site universitaire/lycee).
+      NODE_USE_ENV_PROXY: 1
     env_file:
       - .env
     healthcheck:

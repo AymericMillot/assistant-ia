@@ -2,6 +2,12 @@ import crypto from "crypto";
 
 const algorithm = "aes-256-gcm";
 const encryptedPrefix = "enc:v1:";
+// GCM : IV de 96 bits et tag d'authentification de 128 bits (valeurs standard).
+// On les impose explicitement au dechiffrement pour qu'une valeur chiffree
+// falsifiee (tag tronque, IV de longueur inattendue) soit rejetee au lieu
+// d'affaiblir silencieusement la verification d'integrite.
+const ivLength = 12;
+const authTagLength = 16;
 
 function getEncryptionKey() {
   const rawKey = process.env.CONFIG_ENCRYPTION_KEY;
@@ -22,8 +28,8 @@ export function encryptSecret(plainText) {
     throw new Error("CONFIG_ENCRYPTION_KEY est requis pour chiffrer un secret.");
   }
 
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(algorithm, key, iv);
+  const iv = crypto.randomBytes(ivLength);
+  const cipher = crypto.createCipheriv(algorithm, key, iv, { authTagLength });
   const ciphertext = Buffer.concat([cipher.update(String(plainText), "utf8"), cipher.final()]);
   const authTag = cipher.getAuthTag();
 
@@ -53,8 +59,18 @@ export function decryptSecret(value) {
   const payload = JSON.parse(
     Buffer.from(value.slice(encryptedPrefix.length), "base64").toString("utf8")
   );
-  const decipher = crypto.createDecipheriv(algorithm, key, Buffer.from(payload.iv, "base64"));
-  decipher.setAuthTag(Buffer.from(payload.tag, "base64"));
+
+  const iv = Buffer.from(String(payload.iv || ""), "base64");
+  const authTag = Buffer.from(String(payload.tag || ""), "base64");
+  if (iv.length !== ivLength) {
+    throw new Error("Secret chiffre invalide : vecteur d'initialisation inattendu.");
+  }
+  if (authTag.length !== authTagLength) {
+    throw new Error("Secret chiffre invalide : tag d'authentification inattendu.");
+  }
+
+  const decipher = crypto.createDecipheriv(algorithm, key, iv, { authTagLength });
+  decipher.setAuthTag(authTag);
 
   const plainText = Buffer.concat([
     decipher.update(Buffer.from(payload.ciphertext, "base64")),

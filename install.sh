@@ -125,15 +125,19 @@ install_requested_version() {
     return 0
   fi
 
-  # tar/curl/rsync sont indispensables pour recuperer et deployer un package
-  # distant. rsync notamment est absent des images cloud Debian/Ubuntu minimales
-  # et d'Alpine : sans ce controle l'echec surviendrait apres le telechargement,
-  # avec un message obscur ("rsync: command not found").
+  # tar/curl/rsync + un outil SHA-256 sont indispensables pour recuperer et
+  # deployer un package distant. rsync est absent des images cloud
+  # Debian/Ubuntu minimales et d'Alpine ; sans ce controle l'echec surviendrait
+  # apres le telechargement avec un message obscur ("rsync: command not found"
+  # ou "SHA256 verification failed" alors que l'archive est saine).
   local missing_tools=()
   local required_tool
   for required_tool in curl tar rsync; do
     command -v "$required_tool" >/dev/null 2>&1 || missing_tools+=("$required_tool")
   done
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    missing_tools+=("coreutils")
+  fi
   if [[ ${#missing_tools[@]} -gt 0 ]]; then
     echo "Outils systeme manquants pour installer une version distante : ${missing_tools[*]}" >&2
     if command -v apt-get >/dev/null 2>&1; then
@@ -617,6 +621,14 @@ current_jwt_secret="$(get_env_value "JWT_SECRET")"
 if [[ -z "$current_jwt_secret" || "$current_jwt_secret" == "changeme_secret_jwt_tres_long" ]]; then
   echo "Generation de JWT_SECRET (signature des sessions)..."
   update_env "JWT_SECRET" "$(generate_random_key)"
+fi
+
+# Jeton partage backend <-> updater : authentifie les operations privilegiees
+# de mise a jour sur le reseau Docker interne (voir requireSharedToken).
+current_updater_token="$(get_env_value "UPDATER_SHARED_TOKEN")"
+if [[ -z "$current_updater_token" ]]; then
+  echo "Generation de UPDATER_SHARED_TOKEN (authentification du service de mise a jour)..."
+  update_env "UPDATER_SHARED_TOKEN" "$(generate_random_key)"
 fi
 
 current_owner_password="$(get_env_value "OWNER_BOOTSTRAP_PASSWORD")"
