@@ -9,7 +9,7 @@ Points clés de cette première version :
 
 - installation Linux/macOS documentée (git clone ou archive), install.sh
   génère .env et les secrets, tire les modèles Ollama et démarre la pile ;
-- canal de mise à jour GitHub Releases : manifest signé SHA-256 obligatoire,
+- canal de mise à jour GitHub Releases : SHA-256 (publié dans la description de la release) obligatoire,
   brouillons et préreleases ignorés, refus des versions inférieures ;
 - application d'une mise à jour avec point de rollback automatique et
   préservation non négociable de .env, backend/data, backend/uploads,
