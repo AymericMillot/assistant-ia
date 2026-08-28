@@ -56,13 +56,34 @@ const hostWorkspaceDirOverride = String(process.env.UPDATE_HOST_WORKSPACE_DIR ||
 // chaque mise a jour/rollback pour repartir sur un etat propre, comme ./restart.sh.
 const fullStackRestartServices = ["ollama", "chromadb", "redis"];
 const remoteFetchTimeoutMs = Math.max(1000, Number(process.env.UPDATE_REMOTE_TIMEOUT_MS || 8000));
-// 5 min par defaut : espace les appels a l'API GitHub (limite 60 req/h non
-// authentifiee, vite atteinte avec un polling frontend rapproche).
+// 5 min par defaut : plancher de fraicheur du cache. Le TTL reellement applique
+// (voir effectiveReleaseTtlMs) est releve pour ne jamais depasser le plafond
+// quotidien d'appels a l'API GitHub.
 const remoteReleaseTtlMs = Math.max(10000, Number(process.env.UPDATE_RELEASE_CACHE_TTL_MS || 5 * 60 * 1000));
+// Plafond DUR d'appels a l'API GitHub par periode de 24 h (UTC), toutes sources
+// confondues : polling admin, page /release publique, verification planifiee.
+// L'API non authentifiee est limitee a 60 req/h par IP et une IP partagee
+// (plusieurs installations, NAT d'etablissement) l'epuise vite -> 403. 10/jour
+// laisse une marge confortable tout en gardant les mises a jour detectables.
+const githubMaxCallsPerDay = Math.max(1, Number(process.env.UPDATE_GITHUB_MAX_CALLS_PER_DAY || 10));
+// Espacement minimal entre deux appels reels : 24 h / plafond. Sert de TTL
+// effectif pour lisser les appels sur la journee au lieu de les concentrer.
+const minReleaseRefreshGapMs = Math.ceil((24 * 60 * 60 * 1000) / githubMaxCallsPerDay);
+const effectiveReleaseTtlMs = Math.max(remoteReleaseTtlMs, minReleaseRefreshGapMs);
+// Cache persiste sur disque : survit aux redemarrages du conteneur updater (qui
+// se reconstruit lui-meme apres chaque mise a jour) pour que le compteur
+// quotidien ne reparte pas de zero a chaque redemarrage.
+const releaseCacheFilePath =
+  String(process.env.UPDATE_RELEASE_CACHE_FILE || "").trim() ||
+  path.join(workspaceDir, ".update-release-cache.json");
 
 let hostWorkspaceDirPromise = null;
 let remoteReleaseCache = null;
 let remoteReleaseCachedAt = 0;
+// Copie en memoire du cache persiste { releases, fetchedAt, lastAttemptAt,
+// budgetDay, budgetCount }. Chargee paresseusement depuis releaseCacheFilePath.
+let persistentReleaseCache = null;
+let persistentReleaseCacheLoaded = false;
 
 const state = {
   busy: false,
@@ -564,8 +585,153 @@ async function fetchRemoteReleases() {
   };
 }
 
+// Jour calendaire UTC : identifiant simple et non ambigu pour le compteur
+// quotidien (pas de dependance au fuseau de l'hote).
+function currentBudgetDay() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function loadPersistentReleaseCache() {
+  if (persistentReleaseCacheLoaded) {
+    return persistentReleaseCache;
+  }
+  persistentReleaseCacheLoaded = true;
+  try {
+    const parsed = JSON.parse(await fsp.readFile(releaseCacheFilePath, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      persistentReleaseCache = {
+        releases: Array.isArray(parsed.releases) ? parsed.releases : null,
+        fetchedAt: Number(parsed.fetchedAt) || 0,
+        lastAttemptAt: Number(parsed.lastAttemptAt) || 0,
+        budgetDay: String(parsed.budgetDay || ""),
+        budgetCount: Number(parsed.budgetCount) || 0
+      };
+    }
+  } catch {
+    persistentReleaseCache = null;
+  }
+  return persistentReleaseCache;
+}
+
+async function savePersistentReleaseCache(next) {
+  persistentReleaseCache = next;
+  persistentReleaseCacheLoaded = true;
+  try {
+    const tmpPath = `${releaseCacheFilePath}.${process.pid}.tmp`;
+    await fsp.writeFile(tmpPath, JSON.stringify(next), "utf8");
+    await fsp.rename(tmpPath, releaseCacheFilePath);
+  } catch (error) {
+    // Cache best-effort : une ecriture qui echoue (FS en lecture seule, droits)
+    // ne doit pas casser la verification de mise a jour. La copie en memoire
+    // continue de servir jusqu'au prochain redemarrage.
+    pushLog(`Cache des releases non persiste sur disque : ${error.message}`);
+  }
+}
+
+// Point de passage UNIQUE vers la source distante des releases. Applique :
+//  - un cache (memoire + disque) avec TTL = max(TTL configure, 24h / plafond) ;
+//  - un plafond dur de githubMaxCallsPerDay appels reels par periode de 24 h ;
+//  - un repli sur le cache perime (stale) quand le plafond est atteint ou que
+//    la source est injoignable, pour ne jamais marteler l'API.
+// config est toujours relu localement (lecture fichier, pas d'appel reseau).
+let remoteReleasesInFlight = null;
+async function getRemoteReleasesRateLimited() {
+  // Deduplication des appels concurrents (la page admin sollicite /status et
+  // /releases quasi simultanement) : un seul passage a la fois, les autres
+  // attendent le meme resultat au lieu de declencher plusieurs appels API.
+  if (remoteReleasesInFlight) {
+    return remoteReleasesInFlight;
+  }
+  remoteReleasesInFlight = (async () => {
+    try {
+      return await resolveRemoteReleasesRateLimited();
+    } finally {
+      remoteReleasesInFlight = null;
+    }
+  })();
+  return remoteReleasesInFlight;
+}
+
+async function resolveRemoteReleasesRateLimited() {
+  const config = await readUpdateConfig();
+  const now = Date.now();
+  const cache = (await loadPersistentReleaseCache()) || {
+    releases: null,
+    fetchedAt: 0,
+    lastAttemptAt: 0,
+    budgetDay: "",
+    budgetCount: 0
+  };
+
+  const today = currentBudgetDay();
+  const budgetUsed = cache.budgetDay === today ? cache.budgetCount : 0;
+  const hasCache = Array.isArray(cache.releases) && cache.releases.length > 0;
+  const budget = { used: budgetUsed, max: githubMaxCallsPerDay, day: today };
+
+  const cacheFresh = hasCache && now - cache.fetchedAt < effectiveReleaseTtlMs;
+  if (cacheFresh) {
+    return { releases: cache.releases, config, stale: false, budget };
+  }
+
+  // Une tentative reelle (succes OU echec) a eu lieu recemment : on ressert le
+  // cache tel quel sans rappeler la source ni consommer de budget.
+  const recentlyAttempted = now - cache.lastAttemptAt < effectiveReleaseTtlMs;
+  if (hasCache && recentlyAttempted) {
+    return { releases: cache.releases, config, stale: true, budget };
+  }
+
+  if (budgetUsed >= githubMaxCallsPerDay) {
+    if (hasCache) {
+      return { releases: cache.releases, config, stale: true, budget };
+    }
+    throw new Error(
+      `Plafond de ${githubMaxCallsPerDay} verifications de mise a jour par 24 h atteint ` +
+        "et aucune donnee en cache. Nouvelle tentative demain, ou configurez " +
+        "UPDATE_GITHUB_TOKEN (limite API relevee) / UPDATE_GITHUB_MAX_CALLS_PER_DAY."
+    );
+  }
+
+  // Budget disponible + cache perime : on interroge la source pour de vrai.
+  try {
+    const { releases } = await fetchRemoteReleases();
+    await savePersistentReleaseCache({
+      releases,
+      fetchedAt: now,
+      lastAttemptAt: now,
+      budgetDay: today,
+      budgetCount: budgetUsed + 1
+    });
+    return {
+      releases,
+      config,
+      stale: false,
+      budget: { ...budget, used: budgetUsed + 1 }
+    };
+  } catch (error) {
+    // Echec reseau/API : on consomme quand meme une unite de budget et on note
+    // lastAttemptAt pour ne pas rappeler une source en erreur avant le prochain
+    // creneau. On ressert le cache perime s'il existe.
+    await savePersistentReleaseCache({
+      releases: cache.releases,
+      fetchedAt: cache.fetchedAt,
+      lastAttemptAt: now,
+      budgetDay: today,
+      budgetCount: budgetUsed + 1
+    });
+    if (hasCache) {
+      return {
+        releases: cache.releases,
+        config,
+        stale: true,
+        budget: { ...budget, used: budgetUsed + 1 }
+      };
+    }
+    throw error;
+  }
+}
+
 async function fetchRemoteReleaseInfo() {
-  const { releases, config } = await fetchRemoteReleases();
+  const { releases, config, stale, budget } = await getRemoteReleasesRateLimited();
   const release = releases[0];
 
   if (!release) {
@@ -574,13 +740,17 @@ async function fetchRemoteReleaseInfo() {
 
   return {
     release,
-    config
+    config,
+    stale,
+    budget
   };
 }
 
 async function fetchRemoteReleaseInfoForVersion(targetVersion) {
   const normalizedTargetVersion = String(targetVersion || "").trim();
-  const { releases, config } = await fetchRemoteReleases();
+  // Meme chemin cache/plafond que la verification : l'admin choisit une version
+  // deja listee par /status ou /releases, donc presente dans le cache.
+  const { releases, config } = await getRemoteReleasesRateLimited();
 
   if (!normalizedTargetVersion) {
     return {
@@ -776,6 +946,10 @@ async function fetchWithTimeout(url, options = {}) {
 // mise a jour lancee depuis l'interface d'administration.
 const MANDATORY_PRESERVED_PATHS = [
   ".update-backups",
+  // Cache + compteur quotidien d'appels a l'API GitHub : le preserver evite que
+  // le compteur reparte de zero apres chaque mise a jour (une mise a jour qui
+  // echoue et se relance ne doit pas rouvrir un quota d'appels).
+  ".update-release-cache.json",
   ".git",
   ".env",
   "update.config.json",
@@ -1176,21 +1350,24 @@ async function restoreBackupArchive(archivePath, preservePaths = []) {
   }
 }
 
+// Le cache (memoire + disque) et le plafond quotidien sont desormais portes par
+// getRemoteReleasesRateLimited : cette fonction ne fait plus que deleguer. Le
+// polling rapproche du front (statut toutes les 2,5 s pendant l'overlay, focus
+// d'onglet, page /release publique) est ainsi absorbe sans appel reseau.
 async function fetchCachedRemoteReleaseInfo() {
-  const now = Date.now();
-  if (remoteReleaseCache && now - remoteReleaseCachedAt < remoteReleaseTtlMs) {
-    return remoteReleaseCache;
-  }
-
-  const result = await fetchRemoteReleaseInfo();
-  remoteReleaseCache = result;
-  remoteReleaseCachedAt = now;
-  return result;
+  return fetchRemoteReleaseInfo();
 }
 
+// Appelee au lancement d'une mise a jour / d'un rollback. Ne force PAS de
+// nouvel appel a l'API distante (ce serait exploitable par le polling 2,5 s de
+// l'overlay) : on invalide seulement la fraicheur pour que le prochain creneau
+// autorise recalcule la disponibilite. Le compteur quotidien est preserve.
 function invalidateRemoteReleaseCache() {
   remoteReleaseCache = null;
   remoteReleaseCachedAt = 0;
+  if (persistentReleaseCache) {
+    persistentReleaseCache = { ...persistentReleaseCache, fetchedAt: 0 };
+  }
 }
 
 async function buildStatus() {
@@ -1207,9 +1384,14 @@ async function buildStatus() {
   try {
     const updateConfig = await readUpdateConfig();
     latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
-    const { release } = await fetchCachedRemoteReleaseInfo();
+    const { release, stale, budget } = await fetchCachedRemoteReleaseInfo();
     const latestVersion = release.version || currentVersion;
     const updateAvailable = compareVersions(latestVersion, currentVersion) === 1;
+    const releaseCheck = {
+      stale: Boolean(stale),
+      budgetUsed: budget?.used ?? null,
+      budgetMax: budget?.max ?? githubMaxCallsPerDay
+    };
 
     setState({
       latestVersion,
@@ -1222,6 +1404,7 @@ async function buildStatus() {
       latestVersion,
       updateAvailable,
       release,
+      releaseCheck,
       latestReleaseUrl,
       retention: maxBackupVersions,
       backups: visibleBackups.map((backup) => ({
@@ -1633,6 +1816,7 @@ const exportExcludes = [
   "export",
   "release",
   ".update-backups",
+  ".update-release-cache.json",
   ".claude",
   "backend/node_modules",
   "frontend/node_modules",
@@ -1908,10 +2092,13 @@ app.get("/status", async (_req, res) => {
 
 app.get("/releases", async (_req, res) => {
   try {
-    const { releases } = await fetchRemoteReleases();
+    // Route publique (page /release, sans auth) : passe par le cache + plafond
+    // pour qu'un afflux de visiteurs ne declenche pas d'appels a l'API GitHub.
+    const { releases, stale } = await getRemoteReleasesRateLimited();
     res.json({
       releases,
-      latestVersion: releases[0]?.version || null
+      latestVersion: releases[0]?.version || null,
+      stale: Boolean(stale)
     });
   } catch (error) {
     res.status(503).json({

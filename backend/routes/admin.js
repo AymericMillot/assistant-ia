@@ -73,7 +73,8 @@ import {
   clearFolderIndex,
   deleteDocumentFromIndex,
   previewDocumentChunks,
-  searchIndexedChunks
+  searchIndexedChunks,
+  syncFeedbackCorrectionIndex
 } from "../services/ragService.js";
 import {
   deleteAttachment,
@@ -259,6 +260,24 @@ router.put("/conversations/:id", async (req, res, next) => {
   }
 });
 
+// Boucle de retour : dès qu'un référent enregistre / modifie / retire une
+// correction, on réaligne l'index vectoriel des corrections en tâche de fond.
+// L'échec de la réindexation ne doit jamais bloquer la réponse HTTP.
+function reindexFeedbackCorrectionInBackground(feedbackId) {
+  if (!feedbackId) {
+    return;
+  }
+
+  Promise.resolve()
+    .then(() => syncFeedbackCorrectionIndex(feedbackId))
+    .catch((error) => {
+      logger.warn("Réindexation d'une correction de feedback ignorée.", {
+        feedbackId,
+        message: error.message
+      });
+    });
+}
+
 router.post("/feedback", async (req, res, next) => {
   try {
     const conversationId = parsePositiveInt(req.body?.conversation_id, "Conversation");
@@ -286,6 +305,8 @@ router.post("/feedback", async (req, res, next) => {
       instructions,
       feedbackStatus
     });
+
+    reindexFeedbackCorrectionInBackground(feedback?.id);
 
     res.status(201).json({
       message:
@@ -349,6 +370,7 @@ router.put("/feedback/:id", async (req, res, next) => {
     }
 
     const feedback = updateFeedback(feedbackId, updates);
+    reindexFeedbackCorrectionInBackground(feedbackId);
 
     res.json({
       message: "Feedback mis à jour.",
@@ -362,6 +384,7 @@ router.put("/feedback/:id", async (req, res, next) => {
 router.delete("/feedback/:id", async (req, res, next) => {
   try {
     const feedback = softDeleteFeedback(parsePositiveInt(req.params.id, "Feedback"));
+    reindexFeedbackCorrectionInBackground(feedback?.id);
     res.json({
       message: "Feedback masqué.",
       feedback

@@ -1,3 +1,37 @@
+Version 1.1.0 — meilleures réponses et meilleur traitement des documents (28 août 2026).
+
+Cette version se concentre sur la qualité de la recherche documentaire et la
+boucle de correction par les référents. Ajouts :
+
+- Query expansion : à chaque question, l'assistant génère automatiquement
+  3 à 5 reformulations (synonymes, tournures différentes) et interroge l'index
+  vectoriel avec toutes ces variantes en plus de la question d'origine. Les
+  extraits qui n'emploient pas exactement les mots de l'utilisateur sont
+  désormais retrouvés. Réglable via RAG_QUERY_EXPANSION_ENABLED (défaut activé)
+  et RAG_QUERY_EXPANSION_MAX (défaut 4).
+- Boucle de retour (feedback loop) : quand un référent enregistre « cette
+  réponse était mauvaise » avec la réponse corrigée et sa consigne, la
+  correction est immédiatement ré-indexée dans une collection interne dédiée.
+  Sur une question similaire posée ensuite, la réponse validée est resservie en
+  priorité comme contexte interne. La correction suit le cycle de vie du
+  feedback : elle est retirée de l'index si le feedback est modifié, rouvert ou
+  masqué.
+- Page d'aide accessible en ligne : la documentation de dépannage (docs/help.html,
+  jusqu'ici seulement consultable hors-ligne via ./help.sh) est servie par le
+  backend sur http://localhost:3000/help (et /help.html).
+- Plafond intégré des appels à l'API GitHub pour la vérification des mises à
+  jour : le service updater se limite lui-même à UPDATE_GITHUB_MAX_CALLS_PER_DAY
+  appels réels par 24 h (défaut 10), toutes sources confondues (polling admin,
+  page publique /release, vérification planifiée). Le résultat est mis en cache
+  sur disque et resservi entre deux appels ; quand le plafond est atteint ou que
+  GitHub est injoignable, la dernière liste connue est servie (marquée « périmée »)
+  au lieu de réessayer en boucle et de déclencher des 403. Définir
+  UPDATE_GITHUB_TOKEN (scope public_repo) relève le quota GitHub de 60 à
+  5000 requêtes/heure, utile derrière une IP d'établissement partagée. doctor.sh
+  lit désormais ce cache au lieu d'interroger GitHub à chaque diagnostic.
+
+---
+
 Version 1.0.0 — première version publique de référence (28 août 2026).
 
 Assistant IA local basé sur du RAG, générique et configurable pour toute

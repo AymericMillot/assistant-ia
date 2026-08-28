@@ -861,62 +861,81 @@ else
     if [[ ! "$update_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
       say_fail "update.config.json : le champ 'repository' est absent ou invalide (attendu : proprietaire/depot)."
     else
-      # Interroge l'API exactement comme le service updater. Le code HTTP
-      # distingue depot introuvable/prive (404) de "joignable mais vide".
-      releases_body_file="$(mktemp)"
-      releases_http="$(curl -s -o "$releases_body_file" -w '%{http_code}' --max-time 10 \
-        -H 'Accept: application/vnd.github+json' \
-        "${update_api_base}/repos/${update_repository}/releases?per_page=100" 2>/dev/null || echo "000")"
-      case "$releases_http" in
-        200)
-          releases_total="$(grep -o '"tag_name"' "$releases_body_file" 2>/dev/null | wc -l | tr -d ' ')"
-          if [[ "${releases_total:-0}" -gt 0 ]]; then
-            say_ok "Canal de mise a jour operationnel : ${update_repository} (${releases_total} release(s) publiee(s))."
-          else
-            say_warn "Depot ${update_repository} accessible mais AUCUNE release publiee : ./update.sh ne pourra rien recuperer tant qu'une release n'est pas creee (voir docs/GITHUB_RELEASES.md)."
-          fi
-          ;;
-        404)
-          say_fail "Depot de mise a jour introuvable : ${update_repository} (404). Les mises a jour distantes ne fonctionneront pas."
-          echo "  -> Le depot doit exister, etre PUBLIC et porter ce nom exact. Corrigez le nom sur GitHub (gh repo rename) ou le champ 'repository' de update.config.json."
-          ;;
-        403)
-          if grep -qi 'rate limit' "$releases_body_file" 2>/dev/null; then
-            say_warn "Quota API GitHub atteint pour cette adresse IP (403). Reessayez plus tard ; la verification reprendra automatiquement."
-            # Le cache updater (5 min) et le polling admin limitent deja les
-            # appels, mais une IP partagee (plusieurs installations, NAT
-            # d'etablissement) peut encore epuiser les 60 req/h non
-            # authentifiees. Un jeton GitHub porte la limite a 5000 req/h.
-            if [[ -z "$(get_env_value "UPDATE_GITHUB_TOKEN")" ]]; then
-              echo "  -> Pour eviter que ca se reproduise : ajoutez UPDATE_GITHUB_TOKEN=<jeton GitHub> dans .env puis ./restart.sh (limite 5000 req/h au lieu de 60)."
-            fi
-          else
-            say_warn "Acces refuse par l'API GitHub (403) pour ${update_repository} : depot prive ? Rendez-le public."
-          fi
-          ;;
-        000)
-          say_warn "API GitHub injoignable (reseau/proxy) : ./update.sh se rabattra sur une reconstruction locale."
-          ;;
-        *)
-          say_warn "Reponse inattendue de l'API GitHub (HTTP ${releases_http}) pour ${update_repository}."
-          ;;
-      esac
-      rm -f "$releases_body_file"
+      # IMPORTANT : ce diagnostic NE DOIT PAS interroger l'API GitHub a chaque
+      # execution, sinon doctor.sh consomme lui-meme le quota (60 req/h non
+      # authentifiees par IP) qu'il est cense proteger. On lit d'abord le cache
+      # que le conteneur updater tient deja a jour (plafond UPDATE_GITHUB_MAX_
+      # CALLS_PER_DAY, defaut 10/jour). Appel direct a GitHub uniquement en
+      # dernier recours, quand aucune donnee en cache n'est disponible.
+      release_cache_file="$ROOT_DIR/.update-release-cache.json"
+      gh_token_set=1
+      [[ -z "$(get_env_value "UPDATE_GITHUB_TOKEN")" ]] && gh_token_set=0
 
-      # Test de l'acces reel DEPUIS le conteneur updater (c'est lui qui fait la
-      # requete en production, pas l'hote) : detecte un blocage reseau/proxy
-      # propre au conteneur meme quand l'hote, lui, joint GitHub.
-      if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx assistant-ia-updater; then
-        updater_gh_code="$(docker exec assistant-ia-updater sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "Accept: application/vnd.github+json" '"${update_api_base}/repos/${update_repository}/releases?per_page=1"'' 2>/dev/null || echo "000")"
-        if [[ "$updater_gh_code" == "200" ]]; then
-          say_ok "Le conteneur updater atteint l'API GitHub."
-        elif [[ "$releases_http" == "200" ]]; then
-          say_fail "L'hote atteint GitHub mais PAS le conteneur updater (HTTP ${updater_gh_code}) : proxy/reseau Docker."
-          echo "  -> Si un proxy est requis, renseignez HTTPS_PROXY/HTTP_PROXY/NO_PROXY dans .env puis ./restart.sh"
-          echo "     (docker-compose.yml fixe deja NODE_USE_ENV_PROXY=1 pour l'updater)."
-        else
-          say_warn "Le conteneur updater n'atteint pas l'API GitHub (HTTP ${updater_gh_code})."
+      cache_releases_count=""
+      cache_budget_used=""
+      cache_budget_day=""
+      if [[ -f "$release_cache_file" ]]; then
+        cache_releases_count="$(grep -o '"version"' "$release_cache_file" 2>/dev/null | wc -l | tr -d ' ')"
+        cache_budget_used="$(grep -o '"budgetCount"[[:space:]]*:[[:space:]]*[0-9]\+' "$release_cache_file" 2>/dev/null | grep -o '[0-9]\+$' | head -n 1)"
+        cache_budget_day="$(grep -o '"budgetDay"[[:space:]]*:[[:space:]]*"[^"]*"' "$release_cache_file" 2>/dev/null | sed -E 's/.*"([^"]*)"$/\1/')"
+      fi
+
+      # Etat "verification" tel que vu par l'updater (reutilise updater_state
+      # deja recupere plus haut) : stale = derniere lecture servie depuis un
+      # cache perime (plafond atteint ou API injoignable).
+      release_check_stale="$(printf '%s' "${updater_state:-}" | grep -o '"stale"[[:space:]]*:[[:space:]]*\(true\|false\)' | head -n 1 | grep -o 'true\|false')"
+      release_check_budget_max="$(printf '%s' "${updater_state:-}" | grep -o '"budgetMax"[[:space:]]*:[[:space:]]*[0-9]\+' | grep -o '[0-9]\+$' | head -n 1)"
+      release_check_budget_max="${release_check_budget_max:-10}"
+
+      if [[ -n "$cache_releases_count" && "${cache_releases_count:-0}" -gt 0 ]]; then
+        say_ok "Canal de mise a jour operationnel : ${update_repository} (${cache_releases_count} release(s) en cache, ${cache_budget_used:-0}/${release_check_budget_max} appel(s) API GitHub aujourd'hui)."
+        if [[ "$release_check_stale" == "true" ]]; then
+          say_warn "L'updater ressert un cache perime pour les releases (plafond quotidien d'appels GitHub atteint ou API momentanement injoignable)."
+          if [[ "$gh_token_set" -eq 0 ]]; then
+            echo "  -> Si l'avertissement persiste : ajoutez UPDATE_GITHUB_TOKEN=<jeton GitHub> dans .env puis ./restart.sh (quota 5000 req/h au lieu de 60), ou relevez UPDATE_GITHUB_MAX_CALLS_PER_DAY."
+          fi
         fi
+      elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx assistant-ia-updater; then
+        # Pas encore de cache : on laisse l'updater faire son premier appel
+        # (compte dans son plafond) plutot que d'en emettre un depuis l'hote.
+        say_warn "L'updater n'a pas encore de liste de releases en cache : la premiere verification aura lieu au prochain creneau (plafond ${release_check_budget_max}/jour)."
+        echo "  -> Forcer maintenant : docker exec assistant-ia-updater curl -s http://127.0.0.1:3010/releases | head -c 200"
+      else
+        # Conteneur updater absent (installation incomplete / diagnostic hors
+        # service) : un unique appel direct pour distinguer 404 / 403 / reseau.
+        releases_body_file="$(mktemp)"
+        releases_http="$(curl -s -o "$releases_body_file" -w '%{http_code}' --max-time 10 \
+          -H 'Accept: application/vnd.github+json' \
+          "${update_api_base}/repos/${update_repository}/releases?per_page=100" 2>/dev/null || echo "000")"
+        case "$releases_http" in
+          200)
+            releases_total="$(grep -o '"tag_name"' "$releases_body_file" 2>/dev/null | wc -l | tr -d ' ')"
+            if [[ "${releases_total:-0}" -gt 0 ]]; then
+              say_ok "Depot de mise a jour joignable : ${update_repository} (${releases_total} release(s)). Le conteneur updater est arrete : demarrez-le pour activer la verification mise en cache."
+            else
+              say_warn "Depot ${update_repository} accessible mais AUCUNE release publiee (voir docs/GITHUB_RELEASES.md)."
+            fi
+            ;;
+          404)
+            say_fail "Depot de mise a jour introuvable : ${update_repository} (404). Les mises a jour distantes ne fonctionneront pas."
+            echo "  -> Le depot doit exister, etre PUBLIC et porter ce nom exact (gh repo rename) ou corrigez 'repository' dans update.config.json."
+            ;;
+          403)
+            if grep -qi 'rate limit' "$releases_body_file" 2>/dev/null; then
+              say_warn "Quota API GitHub deja atteint pour cette IP (403). Demarrez le conteneur updater : il met le resultat en cache et plafonne les appels a ${release_check_budget_max}/jour."
+              [[ "$gh_token_set" -eq 0 ]] && echo "  -> Ajoutez aussi UPDATE_GITHUB_TOKEN=<jeton GitHub> dans .env puis ./restart.sh (quota 5000 req/h au lieu de 60)."
+            else
+              say_warn "Acces refuse par l'API GitHub (403) pour ${update_repository} : depot prive ? Rendez-le public."
+            fi
+            ;;
+          000)
+            say_warn "API GitHub injoignable (reseau/proxy) : ./update.sh se rabattra sur une reconstruction locale."
+            ;;
+          *)
+            say_warn "Reponse inattendue de l'API GitHub (HTTP ${releases_http}) pour ${update_repository}."
+            ;;
+        esac
+        rm -f "$releases_body_file"
       fi
     fi
   elif curl -sf --max-time 5 -o /dev/null "$update_base_url" 2>/dev/null || curl -sf --max-time 5 -o /dev/null "${update_base_url%/}/version.json" 2>/dev/null; then

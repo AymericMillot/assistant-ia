@@ -76,6 +76,22 @@ Internet), la vérification peut être temporairement refusée (`403 rate limit`
 conséquence : la vérification reprend automatiquement, et `./update.sh` continue de fonctionner
 avec les fichiers locaux entre-temps.
 
+### Plafond quotidien intégré
+
+Le conteneur `updater` **plafonne lui-même** ses appels à l'API GitHub :
+
+- au plus **`UPDATE_GITHUB_MAX_CALLS_PER_DAY`** appels réels par période de 24 h (UTC), défaut **10** ;
+- le résultat est mis en cache sur disque (`.update-release-cache.json`, préservé lors des mises à
+  jour) et **resservi** à toutes les sources — polling de l'admin, page publique `/release`,
+  vérification planifiée — sans nouvel appel réseau ;
+- entre deux appels réels, un intervalle minimal de `24 h ÷ plafond` (~2,4 h pour 10) est respecté ;
+- quand le plafond est atteint ou que GitHub est injoignable, la dernière liste connue est servie
+  telle quelle (marquée « périmée » dans l'état de l'updater) au lieu de réessayer en boucle.
+
+Pour relever franchement la limite (déploiements multiples derrière la même IP), définissez
+**`UPDATE_GITHUB_TOKEN`** dans `.env` (scope `public_repo` suffit) puis `./restart.sh` : le quota
+GitHub passe de 60 à 5000 requêtes/heure.
+
 ## Diagnostic
 
 ```bash

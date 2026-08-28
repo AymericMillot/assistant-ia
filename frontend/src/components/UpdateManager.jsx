@@ -166,12 +166,16 @@ export default function UpdateManager() {
   // fond, l'affichage resterait fige sur l'ancienne version tant que la page
   // n'est pas rechargee manuellement. On rafraichit periodiquement, et
   // immediatement des que l'onglet redevient visible/actif.
+  // 30 min : cote updater la liste des releases est mise en cache ~2,4 h et les
+  // appels a l'API GitHub sont plafonnes (10/jour). Sonder plus souvent ne
+  // detecterait rien de plus ; le rafraichissement sur focus d'onglet couvre
+  // les cas ou l'admin revient verifier tout de suite.
   useEffect(() => {
     const backgroundInterval = window.setInterval(() => {
       if (!overlayVisible) {
         loadStatus();
       }
-    }, 5 * 60 * 1000);
+    }, 30 * 60 * 1000);
 
     function handleVisible() {
       if (document.visibilityState === "visible" && !overlayVisible) {

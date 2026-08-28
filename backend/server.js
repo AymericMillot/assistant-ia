@@ -49,6 +49,18 @@ function resolveFrontendDistPath() {
   );
 }
 
+function resolveHelpPagePath() {
+  const candidates = [
+    process.env.HELP_PAGE_PATH,
+    "./docs/help.html",
+    "../docs/help.html"
+  ]
+    .filter(Boolean)
+    .map((candidate) => path.resolve(process.cwd(), candidate));
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 function validateRuntimeConfiguration() {
   const requiredSecrets = ["JWT_SECRET", "CONFIG_ENCRYPTION_KEY"];
   const invalidSecrets = requiredSecrets.filter((key) => {
@@ -362,6 +374,27 @@ app.get("/api/releases", async (_req, res, next) => {
 app.use("/api/auth", enforceLocalAdminAccess, authRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/admin", enforceLocalAdminAccess, adminRoutes);
+
+// Page d'aide/documentation statique, accessible publiquement sur /help
+// (et /help.html). Enregistree avant le catch-all du SPA pour ne pas etre
+// masquee par index.html.
+const helpPagePath = resolveHelpPagePath();
+app.get(["/help", "/help.html"], (_req, res) => {
+  if (!helpPagePath) {
+    res.status(404).send("Page d'aide indisponible.");
+    return;
+  }
+
+  // La page d'aide est un document autonome avec un petit script inline (bascule
+  // de theme, sommaire actif). On assouplit donc la CSP pour cette seule reponse
+  // afin d'autoriser ce script, tout en gardant un cadre strict par ailleurs.
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  );
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(helpPagePath);
+});
 
 if (hasBundledFrontend) {
   app.get(/^\/admin(?:\/.*)?$/, enforceLocalAdminAccess, (_req, res) => {

@@ -8,7 +8,7 @@ import { load as loadHtml } from "cheerio";
 import { Chroma } from "@langchain/community/vectorstores/chroma";
 import { Document } from "@langchain/core/documents";
 import { OllamaEmbeddings } from "@langchain/ollama";
-import { getActiveModel, getModelContextLength } from "./ollamaService.js";
+import { generateChatAnswer, getActiveModel, getModelContextLength } from "./ollamaService.js";
 import { TokenTextSplitter } from "@langchain/textsplitters";
 import { ChromaClient } from "chromadb";
 import mammoth from "mammoth";
@@ -25,12 +25,21 @@ import {
 import { getBranding } from "../config/branding.js";
 import { logger } from "../config/logger.js";
 import { getAbsoluteDocumentPath, listFolders, syncFilesystemToDatabase } from "./fileService.js";
-import { getRelevantImprovementRules } from "./feedbackService.js";
+import { getFeedbackById, getRelevantImprovementRules } from "./feedbackService.js";
 import { getRatingSignalsForQuestion } from "./ratingService.js";
 
-// Collections dediees hors dossiers documentaires : liens web scrapes et pieces jointes utilisateur.
+// Collections dediees hors dossiers documentaires : liens web scrapes, pieces
+// jointes utilisateur et corrections validees par un referent (boucle de retour).
 const webLinksFolderKey = "_web_links";
 const attachmentsFolderKey = "_attachments";
+const correctionsFolderKey = "_corrections";
+
+// Query expansion : on genere quelques reformulations de la question pour
+// interroger l'index plus largement (synonymes, tournures differentes).
+const queryExpansionEnabled =
+  String(process.env.RAG_QUERY_EXPANSION_ENABLED || "true").toLowerCase() !== "false";
+const queryExpansionMax = Math.max(0, Number(process.env.RAG_QUERY_EXPANSION_MAX || 4));
+const queryExpansionCache = new Map();
 
 const chromaUrl = new URL(process.env.CHROMA_URL || "http://localhost:8000");
 const chromaClient = new ChromaClient({
@@ -1431,6 +1440,76 @@ function buildRetrievalQuery(question, history = []) {
   return retrievalParts.filter(Boolean).join("\n");
 }
 
+// Genere 3 a 5 reformulations de la question via le modele actif pour elargir la
+// recherche vectorielle. Best-effort : toute erreur renvoie une liste vide et la
+// recherche continue avec la seule requete d'origine.
+async function expandRetrievalQueries(question) {
+  const baseQuestion = String(question || "").trim();
+  if (!queryExpansionEnabled || queryExpansionMax === 0 || baseQuestion.length < 8) {
+    return [];
+  }
+
+  const cached = queryExpansionCache.get(baseQuestion);
+  if (cached) {
+    return cached;
+  }
+
+  let variants = [];
+  try {
+    const { text } = await generateChatAnswer({
+      messages: [
+        {
+          role: "system",
+          content:
+            "Tu assistes un moteur de recherche documentaire interne. " +
+            `A partir de la question fournie, propose ${queryExpansionMax} reformulations courtes ` +
+            "qui expriment le meme besoin avec des synonymes et des tournures differentes. " +
+            "Reponds uniquement avec les reformulations, une par ligne, sans numerotation ni commentaire."
+        },
+        { role: "user", content: baseQuestion }
+      ]
+    });
+
+    variants = String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[\s>*•\-–—]+/, "").replace(/^\d+[.)\]]\s*/, "").trim())
+      .filter((line) => line.length >= 4 && line.length <= 300)
+      .filter((line) => line.toLowerCase() !== baseQuestion.toLowerCase());
+    variants = [...new Set(variants)].slice(0, queryExpansionMax);
+  } catch (error) {
+    logger.warn("Expansion de requete ignoree.", { message: error.message });
+    variants = [];
+  }
+
+  if (queryExpansionCache.size > 200) {
+    queryExpansionCache.clear();
+  }
+  queryExpansionCache.set(baseQuestion, variants);
+  return variants;
+}
+
+// Deux reformulations peuvent renvoyer le meme extrait : on ne garde qu'une
+// occurrence par (document, chunk), avec la meilleure distance (la plus faible).
+function dedupeRetrievalCandidates(candidates) {
+  const byKey = new Map();
+
+  for (const candidate of candidates) {
+    const meta = candidate.metadata || {};
+    const key = meta.source_path
+      ? `${meta.source_path}#${meta.chunk_index ?? 0}`
+      : `${meta.folder || ""}|${meta.file_name || meta.original_name || ""}|${String(
+          candidate.pageContent || ""
+        ).slice(0, 160)}`;
+
+    const existing = byKey.get(key);
+    if (!existing || Number(candidate.score) < Number(existing.score)) {
+      byKey.set(key, candidate);
+    }
+  }
+
+  return [...byKey.values()];
+}
+
 function shouldCarryConversationHistory(question, history = []) {
   if (isShortFollowUpQuestion(question) || isSourceOnlyRequest(question)) {
     return true;
@@ -2264,6 +2343,104 @@ export async function deleteAttachmentFromIndex(attachmentId) {
   }
 }
 
+export async function deleteFeedbackCorrectionFromIndex(feedbackId) {
+  try {
+    const collection = await getCollection(correctionsFolderKey);
+    await collection.delete({
+      where: {
+        feedback_id: Number(feedbackId)
+      }
+    });
+    invalidateSearchCache(correctionsFolderKey);
+  } catch (error) {
+    logger.warn("Suppression Chroma d'une correction referent ignoree.", {
+      feedbackId,
+      message: error.message
+    });
+  }
+}
+
+// Indexe (ou reindexe) la correction d'un referent : la question d'origine, la
+// reponse validee et la consigne sont regroupees en un extrait interne prioritaire
+// que la recherche vectorielle pourra resservir sur des questions similaires.
+export async function indexFeedbackCorrection(feedback) {
+  if (!feedback || !feedback.id) {
+    return { chunkCount: 0 };
+  }
+
+  await deleteFeedbackCorrectionFromIndex(feedback.id);
+
+  const question = String(feedback.exchangeQuestion || "").trim();
+  const correctedResponse = String(feedback.correctedResponse || "").trim();
+  const instructions = String(feedback.instructions || "").trim();
+
+  if (!correctedResponse && !instructions) {
+    return { chunkCount: 0 };
+  }
+
+  const body = [
+    question ? `Question : ${question}` : "",
+    correctedResponse ? `Reponse validee par un referent : ${correctedResponse}` : "",
+    instructions ? `Consigne du referent : ${instructions}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const chunks = await buildIndexableChunks(body);
+  if (chunks.length === 0) {
+    return { chunkCount: 0 };
+  }
+
+  const documents = chunks.map(
+    (chunk, index) =>
+      new Document({
+        pageContent: chunk,
+        metadata: {
+          source_type: "feedback_correction",
+          feedback_id: Number(feedback.id),
+          original_name: "Correction validee par un referent",
+          file_name: "",
+          folder: "corrections",
+          visibility: "private",
+          chunk_index: index
+        }
+      })
+  );
+
+  const vectorStore = await getVectorStore(correctionsFolderKey);
+  const batchSize = Number(process.env.RAG_INDEX_BATCH_SIZE || 8);
+  for (let index = 0; index < documents.length; index += batchSize) {
+    await vectorStore.addDocuments(documents.slice(index, index + batchSize));
+    await sleep(0);
+  }
+
+  invalidateSearchCache(correctionsFolderKey);
+  logger.info("Correction referent indexee dans ChromaDB.", {
+    feedbackId: feedback.id,
+    chunkCount: documents.length
+  });
+
+  return { chunkCount: documents.length };
+}
+
+// Aligne l'index sur l'etat courant d'un feedback : une correction n'est indexee
+// que si elle est active (non supprimee et marquee "resolved"), sinon elle est
+// retiree. Best-effort : ne doit jamais faire echouer l'action d'administration.
+export async function syncFeedbackCorrectionIndex(feedbackId) {
+  const feedback = getFeedbackById(Number(feedbackId));
+
+  const active =
+    feedback && !feedback.isDeleted && feedback.feedbackStatus === "resolved";
+
+  if (!active) {
+    await deleteFeedbackCorrectionFromIndex(feedbackId);
+    return { indexed: false };
+  }
+
+  const result = await indexFeedbackCorrection(feedback);
+  return { indexed: true, chunkCount: result.chunkCount };
+}
+
 export async function deleteDocumentFromIndex(documentRecord) {
   try {
     const collection = await getCollection(documentRecord.folderName);
@@ -2282,7 +2459,12 @@ export async function deleteDocumentFromIndex(documentRecord) {
 }
 
 export async function clearAllIndexes() {
-  const folders = [...(await listFolders()), webLinksFolderKey, attachmentsFolderKey];
+  const folders = [
+    ...(await listFolders()),
+    webLinksFolderKey,
+    attachmentsFolderKey,
+    correctionsFolderKey
+  ];
   let clearedCollections = 0;
 
   for (const folder of folders) {
@@ -2402,7 +2584,19 @@ export async function retrieveContext(question, folderName = "all", history = []
     maxDocumentLinksInPrompt
   );
   const improvementRules = getRelevantImprovementRules(retrievalFocusQuestion, { limit: 5 });
-  const queryEmbedding = await getEmbeddings().embedQuery(retrievalQuery);
+
+  // Query expansion : la requete d'origine PLUS quelques reformulations generees
+  // par le modele, pour retrouver les extraits qui emploient d'autres termes que
+  // ceux choisis par l'utilisateur.
+  const expandedQueries = await expandRetrievalQueries(retrievalFocusQuestion);
+  const retrievalQueryVariants = [
+    ...new Set(
+      [retrievalQuery, ...expandedQueries].map((value) => String(value || "").trim()).filter(Boolean)
+    )
+  ];
+  const queryEmbeddings = await Promise.all(
+    retrievalQueryVariants.map((variant) => getEmbeddings().embedQuery(variant))
+  );
 
   if (referencedDocument) {
     const directDocumentRows = await getIndexedRowsForDocument(referencedDocument);
@@ -2426,26 +2620,35 @@ export async function retrieveContext(question, folderName = "all", history = []
       ? [referencedDocument.folder_name]
       : folders;
 
-  // Les liens web scrapes et les pieces jointes utilisateur participent toujours
-  // a la recherche : ce sont des sources internes au meme titre que les documents.
-  const collectionsToQuery = [...foldersToQuery, webLinksFolderKey, attachmentsFolderKey];
+  // Les liens web scrapes, les pieces jointes utilisateur et les corrections
+  // validees par un referent participent toujours a la recherche : ce sont des
+  // sources internes au meme titre que les documents.
+  const collectionsToQuery = [
+    ...foldersToQuery,
+    webLinksFolderKey,
+    attachmentsFolderKey,
+    correctionsFolderKey
+  ];
 
   for (const folder of collectionsToQuery) {
     try {
       const collection = await getCollection(folder);
       const queryResult = await collection.query({
-        queryEmbeddings: [queryEmbedding],
+        queryEmbeddings,
         nResults: ragTopK,
         include: ["documents", "metadatas", "distances"]
       });
 
-      const rows = typeof queryResult.rows === "function" ? queryResult.rows()[0] || [] : [];
-
-      rows.forEach((row) => {
-        candidates.push({
-          pageContent: row.document || "",
-          metadata: row.metadata || {},
-          score: Number(row.distance || 0)
+      // Avec plusieurs requetes (query expansion), rows() renvoie un groupe de
+      // resultats par requete : on les aplatit tous dans les candidats.
+      const resultGroups = typeof queryResult.rows === "function" ? queryResult.rows() : [];
+      resultGroups.forEach((group) => {
+        (group || []).forEach((row) => {
+          candidates.push({
+            pageContent: row.document || "",
+            metadata: row.metadata || {},
+            score: Number(row.distance || 0)
+          });
         });
       });
     } catch (error) {
@@ -2456,7 +2659,10 @@ export async function retrieveContext(question, folderName = "all", history = []
     }
   }
 
-  const chunks = prioritizeDocumentChunks(retrievalFocusQuestion, candidates);
+  const chunks = prioritizeDocumentChunks(
+    retrievalFocusQuestion,
+    dedupeRetrievalCandidates(candidates)
+  );
   const domainKeywordScore = computeDomainKeywordScore(retrievalFocusQuestion, history);
   const maxRelevanceScore =
     chunks.length > 0 ? Math.max(...chunks.map((chunk) => chunk.relevanceScore)) : 0;
@@ -2553,6 +2759,7 @@ export async function retrieveContext(question, folderName = "all", history = []
   return {
     query: retrievalQuery,
     focusQuery: retrievalFocusQuestion,
+    expandedQueries,
     ratingSignals,
     chunks,
     effectiveChunks,

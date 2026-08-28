@@ -24,6 +24,9 @@ RUN npm ci --omit=dev --legacy-peer-deps
 
 COPY backend/ ./
 COPY --from=frontend-build /workspace/frontend/dist /app/public
+# Page d'aide/documentation servie sur /help (source unique : docs/help.html,
+# egalement utilisee hors-ligne par ./help.sh).
+COPY docs/help.html /app/docs/help.html
 
 RUN mkdir -p /app/uploads /app/logs /app/data
 
