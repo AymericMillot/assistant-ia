@@ -1425,8 +1425,30 @@ async function applyUpdateInBackground(targetVersion = "", { includeBeta = false
         pushLog("Code de l'updater inchangé : redémarrage du service de mise à jour évité.");
       }
 
+      // Le redemarrage de l'updater (deferredServices, plus bas) NE DOIT PAS
+      // dependre du succes de celui du backend : si le CLI Docker du
+      // conteneur updater lui-meme est casse (ex: bug de decouverte du
+      // plugin "docker compose" corrige en v1.0.2), runComposeUpdate ici
+      // echoue systematiquement avec la MEME cause, empechant pour toujours
+      // l'updater de se reconstruire et donc de se corriger lui-meme. On
+      // capture l'erreur, on tente quand meme le self-heal de l'updater, puis
+      // on relance l'erreur d'origine.
+      let immediateServicesError = null;
       if (immediateServices.length > 0) {
-        await runComposeUpdate(immediateServices);
+        try {
+          await runComposeUpdate(immediateServices);
+        } catch (error) {
+          immediateServicesError = error;
+        }
+      }
+
+      if (deferredServices.length > 0) {
+        pushLog("Redémarrage de l'updater programmé en arrière-plan.");
+        triggerDetachedComposeUpdate(deferredServices);
+      }
+
+      if (immediateServicesError) {
+        throw immediateServicesError;
       }
 
       setState({
@@ -1456,11 +1478,6 @@ async function applyUpdateInBackground(targetVersion = "", { includeBeta = false
         completedAt: new Date().toISOString()
       });
       pushLog(`Mise à jour terminée avec succès vers ${targetReleaseVersion}.`);
-
-      if (deferredServices.length > 0) {
-        pushLog("Redémarrage de l'updater programmé en arrière-plan.");
-        triggerDetachedComposeUpdate(deferredServices);
-      }
     } finally {
       await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
     }
@@ -1535,8 +1552,24 @@ async function rollbackToBackupInBackground(backupId) {
       pushLog("Code de l'updater inchangé : redémarrage du service de mise à jour évité.");
     }
 
+    // Meme raisonnement que dans applyUpdateInBackground : ne jamais laisser
+    // un echec de redemarrage du backend empecher le self-heal de l'updater.
+    let immediateServicesError = null;
     if (immediateServices.length > 0) {
-      await runComposeUpdate(immediateServices);
+      try {
+        await runComposeUpdate(immediateServices);
+      } catch (error) {
+        immediateServicesError = error;
+      }
+    }
+
+    if (deferredServices.length > 0) {
+      pushLog("Redémarrage de l'updater programmé en arrière-plan.");
+      triggerDetachedComposeUpdate(deferredServices);
+    }
+
+    if (immediateServicesError) {
+      throw immediateServicesError;
     }
 
     setState({
@@ -1561,11 +1594,6 @@ async function rollbackToBackupInBackground(backupId) {
       completedAt: new Date().toISOString()
     });
     pushLog(`Rollback terminé vers ${backup.version}.`);
-
-    if (deferredServices.length > 0) {
-      pushLog("Redémarrage de l'updater programmé en arrière-plan.");
-      triggerDetachedComposeUpdate(deferredServices);
-    }
   } catch (error) {
     setState({
       busy: false,
