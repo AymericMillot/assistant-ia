@@ -69,7 +69,8 @@ jobs:
           } >> "$notes_file"
 
           # Assets = uniquement le code source (.tar.gz et .zip).
+          # Titre de la release = le tag lui-meme (vX.X.X).
           gh release create "v$version" \
-            "$folder/$base.tar.gz#Code source ($version, .tar.gz)" \
-            "$folder/$base.zip#Code source ($version, .zip)" \
-            --title "Assistant IA $version" --notes-file "$notes_file"
+            "$folder/$base.tar.gz#Code source (v$version, .tar.gz)" \
+            "$folder/$base.zip#Code source (v$version, .zip)" \
+            --title "v$version" --notes-file "$notes_file"
