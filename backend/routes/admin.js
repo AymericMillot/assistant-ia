@@ -1574,7 +1574,7 @@ router.get("/update/status", async (_req, res, next) => {
   }
 });
 
-router.get("/update/backups", requireRole(["administrator", "owner"]), async (_req, res, next) => {
+router.get("/update/backups", requireRole(["referent", "administrator", "owner"]), async (_req, res, next) => {
   try {
     const payload = await updateService.getUpdateBackups();
     res.json(payload);
@@ -1596,7 +1596,7 @@ router.get("/update/backups", requireRole(["administrator", "owner"]), async (_r
   }
 });
 
-router.post("/update/apply", requireRole(["administrator", "owner"]), async (req, res, next) => {
+router.post("/update/apply", requireRole(["referent", "administrator", "owner"]), async (req, res, next) => {
   try {
     markActivity();
     const targetVersionRaw = String(req.body?.targetVersion || "").trim();

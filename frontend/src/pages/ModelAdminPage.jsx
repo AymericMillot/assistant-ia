@@ -152,10 +152,10 @@ const baseTabs = [
   { id: "modeles", label: "Modèles" },
   { id: "indexation", label: "Indexation" },
   { id: "performance", label: "Performance" },
-  { id: "donnees", label: "Données" }
+  { id: "donnees", label: "Données" },
+  { id: "mise-a-jour", label: "Mise à jour" }
 ];
 const elevatedTabs = [
-  { id: "mise-a-jour", label: "Mise à jour" },
   { id: "comptes-admin", label: "Comptes admin" },
   { id: "audit", label: "Audit" },
   { id: "export-deploiement", label: "Export et déploiement" }
