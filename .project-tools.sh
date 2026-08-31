@@ -122,6 +122,49 @@ generate_random_key() {
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+# Liste (une cle par ligne) les variables presentes dans .env.example mais
+# absentes de .env. Une derive de ce type apparait quand une mise a jour
+# introduit une nouvelle variable de configuration : l'ancien .env, preserve
+# tel quel, ne la contient pas et le backend demarre alors avec une valeur par
+# defaut implicite (souvent correcte, mais invisible pour l'operateur).
+missing_env_keys() {
+  [[ -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]] || return 0
+
+  local example_key
+  while IFS= read -r example_key; do
+    [[ -z "$example_key" ]] && continue
+    grep -qE "^[[:space:]]*${example_key}=" "$ENV_FILE" || printf '%s\n' "$example_key"
+  done < <(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$ENV_EXAMPLE" \
+    | sed -E 's/^[[:space:]]*//; s/=$//' | sort -u)
+}
+
+# Ajoute a .env les lignes « CLE=valeur » de .env.example pour les seules cles
+# manquantes (voir missing_env_keys). Ne modifie jamais une cle deja definie.
+append_missing_env_keys() {
+  local keys
+  keys="$(missing_env_keys)"
+  [[ -z "$keys" ]] && return 0
+
+  local key example_line
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    example_line="$(grep -E "^[[:space:]]*${key}=" "$ENV_EXAMPLE" | head -n 1)"
+    [[ -n "$example_line" ]] && printf '%s\n' "${example_line#"${example_line%%[![:space:]]*}"}" >> "$ENV_FILE"
+  done <<< "$keys"
+}
+
+# Affiche les dernieres lignes de log d'un service (best effort, sur stderr).
+# Appele apres un timeout de demarrage pour donner tout de suite la cause
+# probable au lieu d'un simple « n'a pas repondu dans le delai imparti ».
+dump_recent_service_logs() {
+  local service="$1"
+  local lines="${2:-40}"
+  command -v docker >/dev/null 2>&1 || return 0
+  echo "---- Derniers logs de ${service} (${lines} lignes) ----" >&2
+  docker_compose logs --tail "$lines" "$service" 2>&1 | sed 's/^/  /' >&2 || true
+  echo "----------------------------------------------------" >&2
+}
+
 ensure_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -202,6 +245,59 @@ docker_compose() {
   docker compose -f "$COMPOSE_FILE" "$@"
 }
 
+# Noms fixes des conteneurs du projet (container_name dans docker-compose.yml)
+# et reseau Compose par defaut (derive de "name:" dans ce meme fichier).
+PROJECT_CONTAINER_NAMES=(
+  assistant-ia-backend
+  assistant-ia-updater
+  assistant-ia-ollama
+  assistant-ia-chromadb
+  assistant-ia-redis
+  assistant-ia-frontend
+)
+PROJECT_COMPOSE_NETWORK="${COMPOSE_PROJECT_NAME:-assistant-ia}_default"
+
+# Recuperation ciblee apres un « docker compose up » sorti en code 125. Les
+# deux causes de loin les plus frequentes lors d'une (re)installation ou d'un
+# redemarrage :
+#   - conteneur orphelin d'un essai precedent interrompu : Docker refuse alors
+#     de recreer le conteneur (« The container name ... is already in use ») ;
+#   - sous-systeme reseau du daemon en defaut (frequent sur Ubuntu juste apres
+#     l'installation de Docker, ou apres une bascule iptables/nftables) : un
+#     simple redemarrage du daemon le reamorce.
+# Aucune action destructrice sur les volumes de donnees. $1 = sortie combinee
+# de la commande qui vient d'echouer.
+_recover_compose_125() {
+  local failure_output="${1:-}"
+
+  if printf '%s' "$failure_output" \
+    | grep -qiE 'is already in use by container|container name .* is already in use|Conflict\. The container name'; then
+    echo "  -> Code 125 : conteneur(s) orphelin(s) d'un essai precedent, suppression..." >&2
+    docker rm -f "${PROJECT_CONTAINER_NAMES[@]}" >/dev/null 2>&1 || true
+    docker_compose down --remove-orphans >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if printf '%s' "$failure_output" \
+    | grep -qiE 'iptables|failed to (set ?up|create|program).*(network|endpoint|ip ?tables)|network [-_a-z0-9]+ not found|Failed to Setup IP tables|could not find an available, non-overlapping'; then
+    echo "  -> Code 125 : sous-systeme reseau de Docker en defaut, redemarrage du daemon..." >&2
+    if command -v systemctl >/dev/null 2>&1; then
+      sudo systemctl restart docker >/dev/null 2>&1 || true
+    elif command -v service >/dev/null 2>&1; then
+      sudo service docker restart >/dev/null 2>&1 || true
+    fi
+    local wait_attempt
+    for wait_attempt in $(seq 1 20); do
+      docker info >/dev/null 2>&1 && break
+      sleep 1
+    done
+    docker network rm "$PROJECT_COMPOSE_NETWORK" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  return 1
+}
+
 # "docker compose up" peut echouer avec le code 125 (echec de la commande
 # docker/compose elle-meme, pas du conteneur) pour des raisons tres variees :
 # daemon Docker pas pleinement pret juste apres un demarrage/redemarrage,
@@ -211,30 +307,38 @@ docker_compose() {
 # script sur un code de sortie brut sans explication.
 _docker_compose_up_with_retry() {
   local -a up_args=("$@")
-  local attempt exit_code delay
+  local attempt exit_code delay log_file
   local max_attempts=3
+  log_file="$(mktemp)"
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     # Ne pas tester la commande directement dans le if : un "if" dont la
     # condition echoue sans "else" remet $? a 0 une fois le bloc referme, ce
     # qui rendrait le vrai code de sortie (125, etc.) illisible juste apres,
-    # et ferait retourner 0 (succes) a la fin malgre l'echec reel.
-    if docker_compose up -d "${up_args[@]}"; then
+    # et ferait retourner 0 (succes) a la fin malgre l'echec reel. La sortie
+    # est dupliquee (tee) pour rester visible tout en restant analysable par
+    # _recover_compose_125.
+    if docker_compose up -d "${up_args[@]}" 2>&1 | tee "$log_file"; then
       exit_code=0
     else
-      exit_code=$?
+      exit_code=${PIPESTATUS[0]}
     fi
 
     if [[ "$exit_code" -eq 0 ]]; then
+      rm -f "$log_file"
       return 0
     fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
+      if [[ "$exit_code" -eq 125 ]]; then
+        _recover_compose_125 "$(cat "$log_file" 2>/dev/null || true)" || true
+      fi
       delay=$((attempt * 5))
       echo "« docker compose up » a echoue (code ${exit_code}), nouvelle tentative dans ${delay}s (${attempt}/${max_attempts})..." >&2
       sleep "$delay"
       continue
     fi
+    rm -f "$log_file"
 
     echo "« docker compose up » a echoue (code ${exit_code}) apres ${max_attempts} tentatives." >&2
     if [[ "$exit_code" -eq 125 ]]; then
@@ -279,7 +383,12 @@ wait_for_http() {
 }
 
 wait_for_backend_ready() {
-  wait_for_http "$(get_local_base_url)/api/health" "Le serveur web"
+  if wait_for_http "$(get_local_base_url)/api/health" "Le serveur web"; then
+    return 0
+  fi
+  dump_recent_service_logs backend 50
+  echo "-> Diagnostic complet : ./doctor.sh" >&2
+  return 1
 }
 
 is_project_running() {

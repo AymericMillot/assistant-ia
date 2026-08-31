@@ -17,6 +17,26 @@ UPDATER_IMAGE_NAME="assistant-ia-updater"
 
 SCRIPT_ARGS=("$@")
 
+# Filet de securite : quelle que soit l'etape qui echoue, l'operateur repart
+# avec une consigne unique (./doctor.sh repare la majorite des cas) plutot
+# qu'avec un code de sortie brut. N'altere pas le code de sortie reel.
+install_error_hint() {
+  local exit_code=$?
+  local line_no="${1:-?}"
+  echo >&2
+  echo "L'installation s'est interrompue (etape ligne ${line_no}, code ${exit_code})." >&2
+  echo "  -> Diagnostic et reparation automatique : ./doctor.sh" >&2
+  echo "  -> Puis relancez : ./install.sh" >&2
+}
+install_interrupt_hint() {
+  echo >&2
+  echo "Installation interrompue (Ctrl-C). Relancez ./install.sh : l'etat deja" >&2
+  echo "cree (images, modeles telecharges) est reutilise, rien n'est recommence a zero." >&2
+  exit 130
+}
+trap 'install_error_hint "$LINENO"' ERR
+trap install_interrupt_hint INT
+
 # Mode non interactif : force via --non-interactive, ou detecte automatiquement
 # si aucun terminal n'est attache (CI, script lance en arriere-plan...).
 NON_INTERACTIVE=0
@@ -113,6 +133,132 @@ retry_on_network_failure() {
 
   echo "${description} a echoue apres ${max_attempts} tentatives. Verifiez votre connexion Internet et relancez ./install.sh." >&2
   return 1
+}
+
+# Affiche les dernieres lignes de log d'un service (best effort, sur stderr),
+# apres un timeout de demarrage : donne la cause probable tout de suite au lieu
+# d'un simple « n'a pas repondu dans le delai imparti ».
+dump_recent_service_logs() {
+  local service="$1"
+  local lines="${2:-40}"
+  command -v docker >/dev/null 2>&1 || return 0
+  echo "---- Derniers logs de ${service} (${lines} lignes) ----" >&2
+  docker compose -f "$ROOT_DIR/docker-compose.yml" logs --tail "$lines" "$service" 2>&1 \
+    | sed 's/^/  /' >&2 || true
+  echo "----------------------------------------------------" >&2
+}
+
+# Noms fixes des conteneurs du projet (container_name dans docker-compose.yml)
+# et reseau Compose par defaut (derive de "name:" dans ce meme fichier).
+PROJECT_CONTAINER_NAMES=(
+  assistant-ia-backend
+  assistant-ia-updater
+  assistant-ia-ollama
+  assistant-ia-chromadb
+  assistant-ia-redis
+  assistant-ia-frontend
+)
+PROJECT_COMPOSE_NETWORK="${COMPOSE_PROJECT_NAME:-assistant-ia}_default"
+
+# Nettoie l'etat Docker residuel qui fait le plus souvent echouer une commande
+# "docker compose ..." avec le code 125 lors d'une primo-installation (ou d'une
+# reprise apres un premier essai interrompu par un manque d'espace disque, une
+# coupure reseau, un Ctrl-C...) :
+#   - conteneur orphelin d'une tentative precedente ("The container name ... is
+#     already in use") ;
+#   - reseau Compose par defaut a moitie cree ;
+#   - sous-systeme reseau du daemon en defaut, frequent sur Ubuntu juste apres
+#     l'installation de Docker : un redemarrage du daemon suffit a le reamorcer.
+# Ne touche jamais aux volumes de donnees (modeles Ollama, base SQLite, uploads).
+# $1 = sortie combinee de la commande compose qui vient d'echouer.
+# Retourne 0 si une action de recuperation a ete tentee, 1 sinon.
+recover_docker_125() {
+  local failure_output="${1:-}"
+
+  if printf '%s' "$failure_output" \
+    | grep -qiE 'is already in use by container|container name .* is already in use|Conflict\. The container name'; then
+    echo "-> Code 125 : suppression des conteneurs orphelins d'une tentative precedente..." >&2
+    docker rm -f "${PROJECT_CONTAINER_NAMES[@]}" >/dev/null 2>&1 || true
+    docker compose -f "$ROOT_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if printf '%s' "$failure_output" \
+    | grep -qiE 'iptables|failed to (set ?up|create|program).*(network|endpoint|ip ?tables)|network [-_a-z0-9]+ not found|Failed to Setup IP tables|could not find an available, non-overlapping'; then
+    echo "-> Code 125 : redemarrage du daemon Docker (sous-systeme reseau en defaut)..." >&2
+    if command -v systemctl >/dev/null 2>&1; then
+      sudo systemctl restart docker >/dev/null 2>&1 || true
+    elif command -v service >/dev/null 2>&1; then
+      sudo service docker restart >/dev/null 2>&1 || true
+    fi
+    local wait_attempt
+    for wait_attempt in $(seq 1 20); do
+      docker info >/dev/null 2>&1 && break
+      sleep 1
+    done
+    docker network rm "$PROJECT_COMPOSE_NETWORK" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  return 1
+}
+
+# Supprime, AVANT la premiere commande Compose, les conteneurs/reseau laisses
+# par une installation precedente interrompue quand aucun service du projet ne
+# tourne : sinon "docker compose up" echoue directement en code 125 ("name is
+# already in use") sans que la boucle de reprise ait la moindre chance.
+preflight_clear_stale_stack() {
+  docker info >/dev/null 2>&1 || return 0
+
+  local running_count
+  running_count="$(docker compose -f "$ROOT_DIR/docker-compose.yml" ps --status running --services 2>/dev/null | grep -c . || true)"
+  [[ "${running_count:-0}" -gt 0 ]] && return 0
+
+  local stale=""
+  local name status
+  for name in "${PROJECT_CONTAINER_NAMES[@]}"; do
+    status="$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || true)"
+    [[ -n "$status" ]] && stale+=" $name"
+  done
+
+  if [[ -n "$stale" ]]; then
+    echo "Conteneurs d'une installation precedente interrompue detectes (${stale# }) : nettoyage avant de repartir..." >&2
+    docker compose -f "$ROOT_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+    docker rm -f $stale >/dev/null 2>&1 || true
+    docker network rm "$PROJECT_COMPOSE_NETWORK" >/dev/null 2>&1 || true
+  fi
+}
+
+# Execute « docker compose run --rm ... » en capturant sa sortie standard (que
+# l'appelant recupere : hash bcrypt, JSON de recommandation materielle...) et
+# en reessayant sur code 125 (conteneur orphelin, reseau du daemon pas encore
+# pret juste apres son demarrage). La sortie standard part sur stdout, tous les
+# diagnostics sur stderr.
+compose_run_capture() {
+  local attempt=1 max_attempts=3 out exit_code err_file
+  err_file="$(mktemp)"
+
+  while (( attempt <= max_attempts )); do
+    if out="$(docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps "$@" 2>"$err_file")"; then
+      cat "$err_file" >&2
+      rm -f "$err_file"
+      printf '%s' "$out"
+      return 0
+    fi
+    exit_code=$?
+    cat "$err_file" >&2
+
+    if (( attempt < max_attempts )); then
+      if [[ "$exit_code" -eq 125 ]]; then
+        recover_docker_125 "$(cat "$err_file" 2>/dev/null || true)" || true
+      fi
+      sleep $((attempt * 5))
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$err_file"
+  return "${exit_code:-1}"
 }
 
 # Telecharge, verifie (SHA256) et applique une version precise depuis le
@@ -606,6 +752,7 @@ update_env() {
 }
 
 check_docker
+preflight_clear_stale_stack
 
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -703,33 +850,42 @@ build_service_or_reuse_local() {
 # daemon Docker pas encore pret, cache de build corrompu, ressources
 # epuisees. On retente avec un delai croissant avant d'abandonner.
 docker_compose_up_service_required() {
-  local service_name="$1"
-  local attempt exit_code delay
+  local -a services=("$@")
+  local services_label="${services[*]}"
+  local attempt exit_code delay log_file
   local max_attempts=3
+  log_file="$(mktemp)"
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     # Ne pas tester la commande directement dans le if : un "if" dont la
     # condition echoue sans "else" remet $? a 0 une fois le bloc referme, ce
     # qui rendrait le vrai code de sortie (125, etc.) illisible juste apres,
-    # et ferait retourner 0 (succes) a la fin malgre l'echec reel.
-    if docker compose -f "$ROOT_DIR/docker-compose.yml" up -d "$service_name"; then
+    # et ferait retourner 0 (succes) a la fin malgre l'echec reel. La sortie
+    # est dupliquee (tee) pour rester visible tout en etant analysable par
+    # recover_docker_125.
+    if docker compose -f "$ROOT_DIR/docker-compose.yml" up -d "${services[@]}" 2>&1 | tee "$log_file"; then
       exit_code=0
     else
-      exit_code=$?
+      exit_code=${PIPESTATUS[0]}
     fi
 
     if [[ "$exit_code" -eq 0 ]]; then
+      rm -f "$log_file"
       return 0
     fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
+      if [[ "$exit_code" -eq 125 ]]; then
+        recover_docker_125 "$(cat "$log_file" 2>/dev/null || true)" || true
+      fi
       delay=$((attempt * 5))
-      echo "« docker compose up ${service_name} » a echoue (code ${exit_code}), nouvelle tentative dans ${delay}s (${attempt}/${max_attempts})..." >&2
+      echo "« docker compose up ${services_label} » a echoue (code ${exit_code}), nouvelle tentative dans ${delay}s (${attempt}/${max_attempts})..." >&2
       sleep "$delay"
       continue
     fi
 
-    echo "« docker compose up ${service_name} » a echoue (code ${exit_code}) apres ${max_attempts} tentatives." >&2
+    rm -f "$log_file"
+    echo "« docker compose up ${services_label} » a echoue (code ${exit_code}) apres ${max_attempts} tentatives." >&2
     if [[ "$exit_code" -eq 125 ]]; then
       echo "Code 125 : la commande docker/compose elle-meme a echoue (pas le conteneur)." >&2
       echo "Causes frequentes et verifications :" >&2
@@ -738,6 +894,7 @@ docker_compose_up_service_required() {
       echo "  - Espace disque insuffisant pour construire les images : df -h" >&2
       echo "  - Cache de build corrompu : docker builder prune" >&2
       echo "  - Conflit de port ou de conteneur existant : docker ps -a" >&2
+      echo "  - Le nettoyage automatique n'a pas suffi : ./doctor.sh (diagnostic + reparation)." >&2
     fi
     return "$exit_code"
   done
@@ -763,11 +920,14 @@ administrator_password_message=""
 if [[ -z "$current_admin_hash" ]]; then
   echo "Generation du mot de passe initial administrateur..."
   initial_admin_password="$(generate_random_key)"
-  generated_hash="$(
-    docker compose -f "$ROOT_DIR/docker-compose.yml" run --rm --no-deps \
-      -e "ADMIN_INITIAL_PASSWORD=$initial_admin_password" backend \
-      node --input-type=module -e "import bcrypt from 'bcrypt'; console.log(await bcrypt.hash(process.env.ADMIN_INITIAL_PASSWORD, 12));"
-  )"
+  generated_hash="$(compose_run_capture \
+    -e "ADMIN_INITIAL_PASSWORD=$initial_admin_password" backend \
+    node --input-type=module -e "import bcrypt from 'bcrypt'; console.log(await bcrypt.hash(process.env.ADMIN_INITIAL_PASSWORD, 12));")"
+  if [[ "$generated_hash" != \$2* ]]; then
+    echo "Echec de generation du hash du mot de passe administrateur (Docker a renvoye une erreur, souvent code 125)." >&2
+    echo "-> Diagnostic et reparation : ./doctor.sh   puis relancez ./install.sh" >&2
+    exit 1
+  fi
   update_env "ADMIN_PASSWORD_HASH" "$generated_hash"
   administrator_password_message="Identifiant administrateur : ${ADMIN_EMAIL:-admin@assistant-ia.local} — mot de passe initial : ${initial_admin_password} (affiche une seule fois)"
 fi
@@ -859,7 +1019,7 @@ fi
 
 echo "Démarrage des services Ollama, ChromaDB et Redis..."
 retry_on_network_failure "Démarrage d'Ollama/ChromaDB/Redis (récupération des images Docker)" \
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d ollama chromadb redis
+  docker_compose_up_service_required ollama chromadb redis
 
 echo "Attente du démarrage d'Ollama..."
 for attempt in $(seq 1 60); do
@@ -869,6 +1029,8 @@ for attempt in $(seq 1 60); do
 
   if [[ "$attempt" -eq 60 ]]; then
     echo "Ollama n'a pas repondu dans le delai imparti." >&2
+    dump_recent_service_logs ollama 50
+    echo "-> Diagnostic : ./doctor.sh" >&2
     exit 1
   fi
 
@@ -972,10 +1134,10 @@ fi
 echo "Demarrage complet de la plateforme..."
 if image_exists_locally "$BACKEND_IMAGE_NAME"; then
   retry_on_network_failure "Demarrage du backend" \
-    docker compose -f "$ROOT_DIR/docker-compose.yml" up -d backend
+    docker_compose_up_service_required backend
 else
   retry_on_network_failure "Construction et demarrage du backend" \
-    docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --build backend
+    docker_compose_up_service_required --build backend
 fi
 
 echo "Demarrage du service de mise a jour..."
@@ -1009,6 +1171,8 @@ for attempt in $(seq 1 60); do
 
   if [[ "$attempt" -eq 60 ]]; then
     echo "Le serveur web n'a pas repondu dans le delai imparti." >&2
+    dump_recent_service_logs backend 60
+    echo "-> Diagnostic : ./doctor.sh" >&2
     exit 1
   fi
 

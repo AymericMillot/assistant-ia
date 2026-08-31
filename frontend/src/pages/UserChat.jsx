@@ -305,6 +305,8 @@ const defaultMessages = [
 
 const attachmentAcceptedExtensions = ".txt,.text,.md,.markdown,.csv,.log,.pdf";
 const attachmentHelpLabel = "Joindre un fichier texte ou PDF (txt, md, csv, log, pdf — 2 Mo max)";
+const attachmentLockedLabel =
+  "Ajout de pièces jointes temporairement indisponible (maintenance technique et sécurité).";
 const attachmentMaxCount = 3;
 
 export default function UserChat() {
@@ -1298,7 +1300,25 @@ export default function UserChat() {
                   </svg>
                 </button>
               ) : null}
-              {branding.attachmentsEnabled !== false ? (
+              {branding.attachmentsLocked ? (
+                <button
+                  type="button"
+                  className="mb-1.5 ml-1 flex h-10 w-10 shrink-0 cursor-not-allowed items-center justify-center rounded-full text-slate-300 opacity-60 dark:text-slate-600"
+                  aria-label={attachmentLockedLabel}
+                  title={attachmentLockedLabel}
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true">
+                    <path
+                      d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              ) : branding.attachmentsEnabled !== false ? (
                 <>
                   <input
                     ref={attachmentInputRef}

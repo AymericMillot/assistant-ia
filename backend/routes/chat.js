@@ -3,6 +3,10 @@ import path from "path";
 import { getLiveChatEstimate } from "../services/analyticsService.js";
 import { getDocumentById, getSetting } from "../config/db.js";
 import {
+  ATTACHMENTS_TEMPORARILY_DISABLED,
+  ATTACHMENTS_DISABLED_REASON
+} from "../config/featureFlags.js";
+import {
   buildAnonymousUserId,
   resolveConversationSessionId,
   saveConversationExchange
@@ -239,6 +243,14 @@ function handleAttachmentUpload(req, res, next) {
 }
 
 function requireAttachmentsEnabled(req, res, next) {
+  // Verrou de code (v1.1.2) : prime sur le reglage d'administration.
+  if (ATTACHMENTS_TEMPORARILY_DISABLED) {
+    return res.status(503).json({
+      message: ATTACHMENTS_DISABLED_REASON,
+      code: "ATTACHMENTS_TEMPORARILY_DISABLED"
+    });
+  }
+
   if (getSetting("attachmentsEnabled", "true") !== "true") {
     return res.status(403).json({
       message: "Les pièces jointes sont désactivées par l'administrateur."
