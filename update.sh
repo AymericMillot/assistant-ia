@@ -5,13 +5,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT_DIR/.project-tools.sh"
 
+# Ctrl-C pendant une mise a jour : message clair plutot qu'une pile d'erreurs
+# « set -e ». Les fichiers preserves (.env, backend/data...) ne sont jamais
+# touches avant la phase rsync, et un point de rollback existe cote updater.
+on_update_interrupt() {
+  echo >&2
+  echo "Mise a jour interrompue. Relancez ./update.sh pour la reprendre." >&2
+  echo "Si le probleme persiste : ./doctor.sh" >&2
+  exit 130
+}
+trap on_update_interrupt INT
+
 CHECK_ONLY=0
 
 download_remote_package() {
   local package_url="$1"
   local archive_path="$2"
+  local attempt max_attempts=4 delay
 
-  curl -fsSL "$package_url" -o "$archive_path"
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if curl -fsSL "$package_url" -o "$archive_path"; then
+      return 0
+    fi
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      delay=$((attempt * 5))
+      echo "Telechargement du package interrompu (tentative ${attempt}/${max_attempts}), nouvel essai dans ${delay}s..." >&2
+      sleep "$delay"
+    fi
+  done
+
+  echo "Impossible de telecharger le package de mise a jour apres ${max_attempts} tentatives (${package_url})." >&2
+  return 1
 }
 
 compute_sha256() {
@@ -133,8 +157,18 @@ apply_remote_package_from_host() {
   rsync "${rsync_args[@]}" "$package_root"/ "$ROOT_DIR"/
 
   echo "[78%] Redémarrage du backend avec le frontend embarqué..."
-  docker_compose_up_build backend updater
-  wait_for_backend_ready
+  if ! docker_compose_up_build backend updater; then
+    echo "Les nouveaux fichiers sont en place mais la reconstruction des conteneurs a echoue." >&2
+    echo "  -> Relancez ./update.sh (elle reprendra la reconstruction avec les fichiers deja synchronises)." >&2
+    echo "  -> Ou revenez a la version precedente depuis l'onglet « Mises a jour » de l'administration." >&2
+    echo "  -> Diagnostic : ./doctor.sh" >&2
+    return 1
+  fi
+  if ! wait_for_backend_ready; then
+    echo "Le backend a ete reconstruit mais ne repond pas encore : consultez les logs ci-dessus." >&2
+    echo "  -> Revenez a la version precedente depuis l'onglet « Mises a jour » si le probleme persiste." >&2
+    return 1
+  fi
 
   echo "[100%] Mise à jour terminée."
   print_access_summary "Mise à jour distante terminée. Version active : ${target_version}"

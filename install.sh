@@ -17,6 +17,26 @@ UPDATER_IMAGE_NAME="assistant-ia-updater"
 
 SCRIPT_ARGS=("$@")
 
+# Filet de securite : quelle que soit l'etape qui echoue, l'operateur repart
+# avec une consigne unique (./doctor.sh repare la majorite des cas) plutot
+# qu'avec un code de sortie brut. N'altere pas le code de sortie reel.
+install_error_hint() {
+  local exit_code=$?
+  local line_no="${1:-?}"
+  echo >&2
+  echo "L'installation s'est interrompue (etape ligne ${line_no}, code ${exit_code})." >&2
+  echo "  -> Diagnostic et reparation automatique : ./doctor.sh" >&2
+  echo "  -> Puis relancez : ./install.sh" >&2
+}
+install_interrupt_hint() {
+  echo >&2
+  echo "Installation interrompue (Ctrl-C). Relancez ./install.sh : l'etat deja" >&2
+  echo "cree (images, modeles telecharges) est reutilise, rien n'est recommence a zero." >&2
+  exit 130
+}
+trap 'install_error_hint "$LINENO"' ERR
+trap install_interrupt_hint INT
+
 # Mode non interactif : force via --non-interactive, ou detecte automatiquement
 # si aucun terminal n'est attache (CI, script lance en arriere-plan...).
 NON_INTERACTIVE=0
@@ -113,6 +133,19 @@ retry_on_network_failure() {
 
   echo "${description} a echoue apres ${max_attempts} tentatives. Verifiez votre connexion Internet et relancez ./install.sh." >&2
   return 1
+}
+
+# Affiche les dernieres lignes de log d'un service (best effort, sur stderr),
+# apres un timeout de demarrage : donne la cause probable tout de suite au lieu
+# d'un simple « n'a pas repondu dans le delai imparti ».
+dump_recent_service_logs() {
+  local service="$1"
+  local lines="${2:-40}"
+  command -v docker >/dev/null 2>&1 || return 0
+  echo "---- Derniers logs de ${service} (${lines} lignes) ----" >&2
+  docker compose -f "$ROOT_DIR/docker-compose.yml" logs --tail "$lines" "$service" 2>&1 \
+    | sed 's/^/  /' >&2 || true
+  echo "----------------------------------------------------" >&2
 }
 
 # Noms fixes des conteneurs du projet (container_name dans docker-compose.yml)
@@ -996,6 +1029,8 @@ for attempt in $(seq 1 60); do
 
   if [[ "$attempt" -eq 60 ]]; then
     echo "Ollama n'a pas repondu dans le delai imparti." >&2
+    dump_recent_service_logs ollama 50
+    echo "-> Diagnostic : ./doctor.sh" >&2
     exit 1
   fi
 
@@ -1136,6 +1171,8 @@ for attempt in $(seq 1 60); do
 
   if [[ "$attempt" -eq 60 ]]; then
     echo "Le serveur web n'a pas repondu dans le delai imparti." >&2
+    dump_recent_service_logs backend 60
+    echo "-> Diagnostic : ./doctor.sh" >&2
     exit 1
   fi
 

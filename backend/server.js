@@ -25,6 +25,11 @@ import { setSocketServer } from "./services/realtimeService.js";
 import { getCurrentVersion } from "./services/appInfoService.js";
 import { getPublicReleases } from "./services/updateService.js";
 import { getBranding } from "./config/branding.js";
+import {
+  ATTACHMENTS_TEMPORARILY_DISABLED,
+  ATTACHMENTS_DISABLED_REASON,
+  areAttachmentsAvailable
+} from "./config/featureFlags.js";
 import { getActiveModelByRole } from "./services/ollamaService.js";
 import { scheduleModelCatalogRefresh } from "./services/modelCatalogRefreshService.js";
 import {
@@ -349,7 +354,13 @@ app.get("/api/branding", (_req, res) => {
     supportEmailUrgent: branding.supportEmailUrgent,
     tabTitle: branding.tabTitle,
     faviconDataUrl: branding.faviconDataUrl,
-    attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true",
+    attachmentsEnabled: areAttachmentsAvailable(
+      getSetting("attachmentsEnabled", "true") === "true"
+    ),
+    attachmentsLocked: ATTACHMENTS_TEMPORARILY_DISABLED,
+    attachmentsDisabledReason: ATTACHMENTS_TEMPORARILY_DISABLED
+      ? ATTACHMENTS_DISABLED_REASON
+      : null,
     reasoningModelAvailable: Boolean(getActiveModelByRole("reasoning"))
   });
 });

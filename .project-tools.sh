@@ -122,6 +122,49 @@ generate_random_key() {
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+# Liste (une cle par ligne) les variables presentes dans .env.example mais
+# absentes de .env. Une derive de ce type apparait quand une mise a jour
+# introduit une nouvelle variable de configuration : l'ancien .env, preserve
+# tel quel, ne la contient pas et le backend demarre alors avec une valeur par
+# defaut implicite (souvent correcte, mais invisible pour l'operateur).
+missing_env_keys() {
+  [[ -f "$ENV_FILE" && -f "$ENV_EXAMPLE" ]] || return 0
+
+  local example_key
+  while IFS= read -r example_key; do
+    [[ -z "$example_key" ]] && continue
+    grep -qE "^[[:space:]]*${example_key}=" "$ENV_FILE" || printf '%s\n' "$example_key"
+  done < <(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$ENV_EXAMPLE" \
+    | sed -E 's/^[[:space:]]*//; s/=$//' | sort -u)
+}
+
+# Ajoute a .env les lignes « CLE=valeur » de .env.example pour les seules cles
+# manquantes (voir missing_env_keys). Ne modifie jamais une cle deja definie.
+append_missing_env_keys() {
+  local keys
+  keys="$(missing_env_keys)"
+  [[ -z "$keys" ]] && return 0
+
+  local key example_line
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    example_line="$(grep -E "^[[:space:]]*${key}=" "$ENV_EXAMPLE" | head -n 1)"
+    [[ -n "$example_line" ]] && printf '%s\n' "${example_line#"${example_line%%[![:space:]]*}"}" >> "$ENV_FILE"
+  done <<< "$keys"
+}
+
+# Affiche les dernieres lignes de log d'un service (best effort, sur stderr).
+# Appele apres un timeout de demarrage pour donner tout de suite la cause
+# probable au lieu d'un simple « n'a pas repondu dans le delai imparti ».
+dump_recent_service_logs() {
+  local service="$1"
+  local lines="${2:-40}"
+  command -v docker >/dev/null 2>&1 || return 0
+  echo "---- Derniers logs de ${service} (${lines} lignes) ----" >&2
+  docker_compose logs --tail "$lines" "$service" 2>&1 | sed 's/^/  /' >&2 || true
+  echo "----------------------------------------------------" >&2
+}
+
 ensure_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -340,7 +383,12 @@ wait_for_http() {
 }
 
 wait_for_backend_ready() {
-  wait_for_http "$(get_local_base_url)/api/health" "Le serveur web"
+  if wait_for_http "$(get_local_base_url)/api/health" "Le serveur web"; then
+    return 0
+  fi
+  dump_recent_service_logs backend 50
+  echo "-> Diagnostic complet : ./doctor.sh" >&2
+  return 1
 }
 
 is_project_running() {

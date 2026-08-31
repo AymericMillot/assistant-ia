@@ -37,6 +37,10 @@ import {
   refreshModelCatalogFromSource
 } from "../services/modelCatalogRefreshService.js";
 import { getBranding, writeBranding } from "../config/branding.js";
+import {
+  ATTACHMENTS_TEMPORARILY_DISABLED,
+  ATTACHMENTS_DISABLED_REASON
+} from "../config/featureFlags.js";
 import { recommendModel } from "../services/hardwareRecommendationService.js";
 import { isSecretsEncryptionAvailable } from "../utils/secretsCrypto.js";
 import { authMiddleware, requireRole } from "../middleware/authMiddleware.js";
@@ -774,7 +778,11 @@ router.get("/attachments", async (_req, res, next) => {
     res.json({
       attachments: listAttachments(),
       retentionDays: Number(process.env.USER_ATTACHMENT_RETENTION_DAYS || 30),
-      attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true"
+      attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true",
+      attachmentsLocked: ATTACHMENTS_TEMPORARILY_DISABLED,
+      attachmentsDisabledReason: ATTACHMENTS_TEMPORARILY_DISABLED
+        ? ATTACHMENTS_DISABLED_REASON
+        : null
     });
   } catch (error) {
     next(error);
@@ -786,6 +794,16 @@ router.patch("/attachments/toggle", (req, res, next) => {
     const { enabled } = req.body || {};
     if (typeof enabled !== "boolean") {
       return res.status(400).json({ message: "La valeur enabled doit etre booleenne." });
+    }
+
+    // Verrou de code (v1.1.2) : le referent ne peut pas reactiver les pieces
+    // jointes tant que la fonctionnalite est suspendue au niveau de la version.
+    if (ATTACHMENTS_TEMPORARILY_DISABLED) {
+      return res.status(423).json({
+        message: ATTACHMENTS_DISABLED_REASON,
+        code: "ATTACHMENTS_TEMPORARILY_DISABLED",
+        locked: true
+      });
     }
 
     markActivity();

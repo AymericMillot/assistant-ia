@@ -1,3 +1,66 @@
+Version 1.1.2 — fiabilité de l'installation et des mises à jour, pièces jointes
+suspendues (31 août 2026).
+
+Pièces jointes du chat temporairement indisponibles.
+
+L'ajout de fichiers dans le chat est suspendu au niveau de cette version, le
+temps d'une maintenance technique sur la chaîne d'indexation et d'un
+renforcement des contrôles de sécurité sur les fichiers déposés par les
+utilisateurs.
+
+- Le bouton « joindre un fichier » est masqué dans le chat ; une icône
+  désactivée avec info-bulle explique la suspension.
+- POST /api/chat/attachments répond 503 (code ATTACHMENTS_TEMPORARILY_DISABLED).
+- Le référent ne peut pas réactiver la fonctionnalité : PATCH
+  /api/admin/attachments/toggle répond 423 tant que le verrou est actif, et
+  l'onglet « Pièces jointes » de l'administration affiche un bandeau dédié.
+- Le verrou est une constante de code (backend/config/featureFlags.js) : il
+  sera levé par une prochaine mise à jour. doctor.sh le signale explicitement
+  comme intentionnel pour éviter un dépannage inutile.
+
+Meilleure gestion des erreurs pendant l'installation et les mises à jour.
+
+- install.sh : filet de sécurité global — toute étape qui échoue renvoie une
+  consigne unique (./doctor.sh puis relancer), Ctrl-C affiche un message clair
+  au lieu d'une pile d'erreurs, et un timeout de démarrage d'Ollama ou du
+  serveur web affiche automatiquement les derniers logs du conteneur concerné.
+- update.sh : le téléchargement du package est réessayé (4 tentatives) au lieu
+  d'abandonner à la première coupure réseau ; si la reconstruction des
+  conteneurs échoue après la synchronisation des fichiers, la marche à suivre
+  (relancer, ou revenir en arrière depuis l'administration) est affichée ;
+  Ctrl-C est intercepté proprement.
+- .project-tools.sh : nouveau repli commun (dump des logs du service sur
+  timeout) et helpers de détection/réparation de la dérive .env <-> .env.example.
+
+doctor.sh enrichi (nouveaux diagnostics + réparations autonomes).
+
+- UPDATER_SHARED_TOKEN : détecte un .env issu d'une installation antérieure à
+  son introduction et propose de le générer (sinon les opérations privilégiées
+  de mise à jour sont refusées).
+- Dérive .env <-> .env.example : liste les clés de configuration introduites
+  par une mise à jour et absentes du .env préservé, avec ajout automatique des
+  valeurs d'exemple sur confirmation.
+- Mémoire insuffisante : repère un conteneur déjà tué par l'OOM killer
+  (code 137) et oriente vers un modèle plus léger (Ollama) ou plus de RAM.
+- Téléchargements Ollama incomplets : détecte les blobs « *-partial » qui
+  occupent l'espace et propose de les purger.
+- « no space left on device » dans les logs récents : signalé même si l'espace
+  disque est revenu depuis, avec la marche à suivre (réindexation).
+- Nouvelle section « Verrous de fonctionnalités » : indique si les pièces
+  jointes sont suspendues par la version en cours.
+
+Tests.
+
+- tests/test-scripts.sh : nouvelle batterie sans dépendance (bash + coreutils,
+  « docker » factice) — syntaxe de tous les scripts, helpers de
+  .project-tools.sh (échappement .env, reconnaissance des motifs du code 125),
+  détection/réparation de la dérive .env, câblage du verrou pièces jointes sur
+  les 6 composants concernés, cohérence des numéros de version.
+- Alignement des versions backend/frontend (package.json + package-lock) sur
+  version.json (1.1.2).
+
+---
+
 Version 1.1.1 — mise à jour automatique quotidienne par défaut (28 août 2026).
 
 La mise à jour automatique n'est plus une option à activer : elle est désormais

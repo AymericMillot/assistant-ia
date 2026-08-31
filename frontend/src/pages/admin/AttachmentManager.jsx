@@ -34,6 +34,8 @@ export default function AttachmentManager() {
   const [attachments, setAttachments] = useState([]);
   const [retentionDays, setRetentionDays] = useState(30);
   const [attachmentsEnabled, setAttachmentsEnabled] = useState(true);
+  const [attachmentsLocked, setAttachmentsLocked] = useState(false);
+  const [attachmentsDisabledReason, setAttachmentsDisabledReason] = useState("");
   const [toggleBusy, setToggleBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -52,6 +54,8 @@ export default function AttachmentManager() {
       setAttachments(payload.attachments || []);
       setRetentionDays(payload.retentionDays || 30);
       setAttachmentsEnabled(payload.attachmentsEnabled !== false);
+      setAttachmentsLocked(payload.attachmentsLocked === true);
+      setAttachmentsDisabledReason(payload.attachmentsDisabledReason || "");
     } catch (requestError) {
       setError(reportError("attachments:load", requestError));
     } finally {
@@ -181,19 +185,41 @@ export default function AttachmentManager() {
           </button>
         </div>
 
+        {attachmentsLocked && (
+          <div className="mt-4">
+            <Alert tone="warning">
+              {attachmentsDisabledReason ||
+                "L'ajout de pièces jointes est temporairement suspendu par cette version de l'application."}{" "}
+              Ce verrou est défini au niveau de la version : il ne peut pas être levé depuis
+              l'administration et sera retiré par une prochaine mise à jour.
+            </Alert>
+          </div>
+        )}
+
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/50">
-          <StatusBadge tone={attachmentsEnabled ? "success" : "neutral"}>
-            {attachmentsEnabled ? "Pièces jointes activées" : "Pièces jointes désactivées"}
+          <StatusBadge tone={attachmentsLocked ? "danger" : attachmentsEnabled ? "success" : "neutral"}>
+            {attachmentsLocked
+              ? "Pièces jointes suspendues (verrou de version)"
+              : attachmentsEnabled
+                ? "Pièces jointes activées"
+                : "Pièces jointes désactivées"}
           </StatusBadge>
           <p className="flex-1 text-sm text-slate-500 dark:text-slate-400">
-            {attachmentsEnabled
-              ? "Les utilisateurs peuvent joindre un fichier à leurs questions dans le chat."
-              : "Le bouton pour joindre un fichier est masqué dans le chat, et tout envoi est refusé côté serveur."}
+            {attachmentsLocked
+              ? "Le bouton est masqué dans le chat et tout envoi est refusé côté serveur (HTTP 503) tant que le verrou est actif."
+              : attachmentsEnabled
+                ? "Les utilisateurs peuvent joindre un fichier à leurs questions dans le chat."
+                : "Le bouton pour joindre un fichier est masqué dans le chat, et tout envoi est refusé côté serveur."}
           </p>
           <button
             className="ghost-button shrink-0"
             type="button"
-            disabled={toggleBusy}
+            disabled={toggleBusy || attachmentsLocked}
+            title={
+              attachmentsLocked
+                ? "Indisponible : fonctionnalité suspendue par la version en cours."
+                : undefined
+            }
             onClick={toggleAttachmentsEnabled}
           >
             {attachmentsEnabled ? "Désactiver" : "Activer"}
