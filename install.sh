@@ -63,17 +63,6 @@ for ((arg_index = 0; arg_index < ${#SCRIPT_ARGS[@]}; arg_index++)); do
   fi
 done
 
-# Installation d'une version specifique : ./install.sh --v1.000 recupere cette
-# version precise depuis le serveur de mise a jour (update.config.json) avant
-# de poursuivre l'installation normale, plutot que d'utiliser les fichiers
-# locaux courants.
-REQUESTED_VERSION=""
-for arg in "$@"; do
-  if [[ "$arg" =~ ^--v([0-9][0-9A-Za-z.]*)$ ]]; then
-    REQUESTED_VERSION="${BASH_REMATCH[1]}"
-  fi
-done
-
 json_string_field_from_file() {
   local file="$1"
   local field="$2"
@@ -436,10 +425,6 @@ install_requested_version() {
   export ASSISTANT_IA_VERSION_APPLIED=1
   exec "$0" "${SCRIPT_ARGS[@]}"
 }
-
-if [[ -n "$REQUESTED_VERSION" ]]; then
-  install_requested_version "$REQUESTED_VERSION"
-fi
 
 detect_os_label() {
   case "$(uname -s 2>/dev/null || echo unknown)" in

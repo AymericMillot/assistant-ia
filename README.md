@@ -127,25 +127,24 @@ chmod +x *.sh
 l'installation de base fonctionne mais `./update.sh` échoue. `./doctor.sh --check-only` vérifie
 ce prérequis. Détails et méthode par archive `wget` : [docs/INSTALL.md](docs/INSTALL.md).
 
-### Linux, installer la dernière version depuis les Releases GitHub
+### Linux, installer depuis la dernière Release GitHub
 
-Page de la dernière version : <https://github.com/AymericMillot/assistant-ia/releases/latest>
-
-Chaque release attache `assistant-ia-vX.X.X.tar.gz` et écrit son SHA-256 dans la description.
-Pour installer sur un serveur Linux sans cloner le dépôt (remplacer `vX.X.X` par la version
-affichée sur la page ci-dessus) :
+Pour installer sur un serveur Linux sans cloner le dépôt, téléchargez automatiquement la
+dernière version :
 
 ```bash
-VERSION=v1.1.1
-curl -fL -o assistant-ia-$VERSION.tar.gz \
-  https://github.com/AymericMillot/assistant-ia/releases/download/$VERSION/assistant-ia-$VERSION.tar.gz
-# vérifier l'intégrité avec le SHA-256 publié dans la description de la release :
-# echo "<sha256 de la release>  assistant-ia-$VERSION.tar.gz" | sha256sum -c
-tar xzf assistant-ia-$VERSION.tar.gz
-cd assistant-ia-$VERSION
+# Récupère la dernière release et la version actuelle
+RELEASE=$(curl -s https://api.github.com/repos/AymericMillot/assistant-ia/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+curl -fL -o assistant-ia.tar.gz \
+  https://github.com/AymericMillot/assistant-ia/releases/download/v$RELEASE/assistant-ia-v$RELEASE.tar.gz
+tar xzf assistant-ia.tar.gz
+cd assistant-ia
 chmod +x *.sh
 ./install.sh
 ```
+
+Vous pouvez aussi télécharger manuellement depuis la page des releases :
+<https://github.com/AymericMillot/assistant-ia/releases/latest>
 
 Sur une instance **déjà installée**, ne pas repartir de l'archive : lancer `./update.sh` dans le
 dossier existant (ou le bouton « Mise à jour » de l'admin), ce qui préserve `.env`, la base et
@@ -169,16 +168,6 @@ En environnement sans terminal interactif (CI, provisionnement automatise) :
 ```bash
 ./install.sh --non-interactive
 ```
-
-Pour installer une version precise (ex. revenir a une version anterieure) plutot que les
-fichiers locaux actuels, recuperee directement depuis le serveur de mise a jour :
-
-```bash
-./install.sh --v1.000
-```
-
-Le script telecharge cette version, verifie son integrite (SHA256), remplace les fichiers du
-projet par ceux de cette version, puis poursuit l'installation normalement avec ces fichiers.
 
 ## Ce que fait install.sh
 
