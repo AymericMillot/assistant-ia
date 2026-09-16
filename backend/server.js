@@ -13,6 +13,7 @@ import { logger, registerRealtimeEmitter } from "./config/logger.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes from "./routes/chat.js";
 import adminRoutes from "./routes/admin.js";
+import feedbackRoutes from "./routes/feedback.js";
 import { syncFilesystemToDatabase } from "./services/fileService.js";
 import { initializeQueueService, shutdownQueue } from "./services/queueService.js";
 import {
@@ -384,6 +385,7 @@ app.get("/api/releases", async (_req, res, next) => {
 
 app.use("/api/auth", enforceLocalAdminAccess, authRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/feedback", feedbackRoutes);
 app.use("/api/admin", enforceLocalAdminAccess, adminRoutes);
 
 // Page d'aide/documentation statique, accessible publiquement sur /help

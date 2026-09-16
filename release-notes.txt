@@ -1,3 +1,22 @@
+Version 1.1.3 — zone publique de signalement (bug / suggestion) reliée à Discord
+(16 septembre 2026).
+
+Les utilisateurs du chat peuvent désormais signaler un bug ou faire une
+suggestion sans passer par l'administration.
+
+- Nouveau bouton flottant sur la page de chat publique : deux formulaires
+  courts (message + contact optionnel), envoyés vers deux salons Discord
+  distincts via webhooks (POST /api/feedback/bug et /api/feedback/suggestion).
+- Endpoints publics, sans authentification, protégés par un rate limit dédié
+  (10 signalements / 15 min / IP par défaut, réglable via FEEDBACK_RATE_LIMIT).
+- Les URLs de webhook (DISCORD_WEBHOOK_BUG_URL, DISCORD_WEBHOOK_SUGGESTION_URL)
+  sont des secrets d'environnement, jamais commités ; un canal non configuré
+  répond une erreur explicite plutôt que d'échouer silencieusement.
+- Chaque message Discord inclut la version de l'application et la page
+  d'origine du signalement pour faciliter le triage.
+
+---
+
 Version 1.1.2 — fiabilité de l'installation et des mises à jour, pièces jointes
 suspendues (31 août 2026).
 

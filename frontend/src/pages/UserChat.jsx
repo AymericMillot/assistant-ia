@@ -4,6 +4,7 @@ import { reportError } from "../lib/errors";
 import { consumeSseResponse } from "../lib/streaming";
 import ActionTooltip from "../components/ui/ActionTooltip";
 import InfoPopover from "../components/ui/InfoPopover";
+import FeedbackWidget from "../components/FeedbackWidget";
 import { useBranding } from "../hooks/useBranding";
 
 const conversationMemoryLimit = 10;
@@ -953,6 +954,7 @@ export default function UserChat() {
 
   return (
     <div className="mx-auto flex w-full max-w-[112rem] flex-col gap-4">
+      <FeedbackWidget />
       <section className="panel mx-auto flex min-h-[76vh] w-full max-w-[112rem] flex-col overflow-hidden">
         <div className="border-b border-slate-200/70 bg-white/65 px-6 py-5 backdrop-blur-xl sm:px-8 dark:border-slate-700/70 dark:bg-slate-900/65">
           <div className="flex items-center justify-between gap-4">
