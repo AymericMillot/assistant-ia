@@ -1,3 +1,25 @@
+Version 1.1.4 — correction d'un échec de build backend sur Docker Desktop
+(21 septembre 2026).
+
+Sur certaines versions de Docker Desktop (macOS notamment), la construction
+de l'image backend pendant l'installation pouvait échouer avec l'erreur
+« failed to get console: provided file is not a console », alors qu'aucune
+image locale n'existait encore pour reprendre — bloquant complètement une
+première installation.
+
+- Cause : install.sh (et les autres scripts basés sur .project-tools.sh :
+  update.sh, doctor.sh...) redirigent ou capturent systématiquement la
+  sortie des builds Docker. BuildKit tentait malgré tout d'utiliser son mode
+  de progression interactif (TTY), qui échoue dès que la sortie standard
+  n'est pas un vrai terminal.
+- Correction : BUILDKIT_PROGRESS=plain est désormais forcé dans install.sh
+  et dans .project-tools.sh, donc appliqué à tous les scripts qui le
+  sourcent.
+- doctor.sh vérifie la présence de ce garde-fou et signale explicitement le
+  risque si une version antérieure du fichier partagé est utilisée seule.
+
+---
+
 Version 1.1.3 — zone publique de signalement (bug / suggestion) reliée à Discord
 (16 septembre 2026).
 
