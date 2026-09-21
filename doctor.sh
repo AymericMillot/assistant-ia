@@ -185,6 +185,20 @@ else
     say_fail "Le plugin 'docker compose' (v2) est introuvable (docker-compose v1 seul ne suffit pas)."
     echo "  -> https://docs.docker.com/compose/install/linux/"
   fi
+
+  # install.sh/update.sh/doctor.sh redirigent ou capturent systematiquement la
+  # sortie des builds Docker. Sans BUILDKIT_PROGRESS=plain, BuildKit essaie
+  # quand meme son mode de progression TTY et echoue avec "failed to get
+  # console: provided file is not a console" (frequent sur Docker Desktop
+  # macOS). .project-tools.sh l'exporte pour tous les scripts qui le sourcent ;
+  # cette verification protege le cas ou doctor.sh serait execute seul, hors
+  # de ces scripts, avec une version anterieure du fichier partage.
+  if [[ "${BUILDKIT_PROGRESS:-}" == "plain" ]]; then
+    say_ok "BUILDKIT_PROGRESS=plain : les echecs de build \"failed to get console\" sont evites."
+  else
+    say_fail "BUILDKIT_PROGRESS n'est pas force a 'plain' dans cette execution : un build Docker dont la sortie est redirigee peut echouer avec \"failed to get console: provided file is not a console\" (frequent sur Docker Desktop macOS)."
+    echo "  -> Corrige automatiquement par install.sh/.project-tools.sh a jour ; relancez avec BUILDKIT_PROGRESS=plain ./doctor.sh si le message persiste."
+  fi
 fi
 
 # ---------------------------------------------------------------------------

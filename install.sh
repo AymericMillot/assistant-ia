@@ -4,6 +4,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Ce script redirige/capture systematiquement la sortie des builds Docker
+# (">/dev/null", "$(...)", "tee"...). Sur certaines versions de Docker
+# Desktop (notamment macOS), BuildKit tente malgre tout d'utiliser son mode
+# de progression interactif (TTY) et echoue avec "failed to get console:
+# provided file is not a console" des que la sortie standard n'est pas un
+# vrai terminal. Forcer le mode "plain" evite ce faux echec de construction.
+export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
+
 # $USER n'est pas toujours exporte (ex: session via "docker exec", certains
 # environnements SSH/cloud minimalistes) : sans repli, set -u fait planter le
 # script des la premiere utilisation. "id -un" est disponible partout.

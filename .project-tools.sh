@@ -6,6 +6,14 @@ ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 COOKIE_FILE="$ROOT_DIR/assistant-ia-admin-cookie.txt"
 
+# Les scripts qui sourcent ce fichier redirigent/capturent souvent la sortie
+# des builds Docker (">/dev/null", "$(...)", "tee"...). Sur certaines
+# versions de Docker Desktop (notamment macOS), BuildKit tente malgre tout
+# d'utiliser son mode de progression interactif (TTY) et echoue avec "failed
+# to get console: provided file is not a console" des que la sortie standard
+# n'est pas un vrai terminal. Forcer le mode "plain" evite ce faux echec.
+export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
+
 os_release_field() {
   local field="$1"
   [[ -f /etc/os-release ]] || return 0
