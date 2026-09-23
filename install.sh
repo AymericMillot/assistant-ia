@@ -4,13 +4,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Ce script redirige/capture systematiquement la sortie des builds Docker
-# (">/dev/null", "$(...)", "tee"...). Sur certaines versions de Docker
-# Desktop (notamment macOS), BuildKit tente malgre tout d'utiliser son mode
-# de progression interactif (TTY) et echoue avec "failed to get console:
-# provided file is not a console" des que la sortie standard n'est pas un
-# vrai terminal. Forcer le mode "plain" evite ce faux echec de construction.
-export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
+# Les scripts redirigent/capturent systematiquement la sortie des builds
+# Docker (">/dev/null", "$(...)", "tee"...). Quand stderr est un terminal mais
+# pas stdout, Docker Compose choisit son affichage interactif (TTY) et echoue
+# avec "failed to get console: provided file is not a console". Compose
+# v2.2x+/v5 IGNORE BUILDKIT_PROGRESS et ne lit que COMPOSE_PROGRESS : les deux
+# sont forces a "plain" (les valeurs non interactives deja choisies par
+# l'operateur sont respectees ; une valeur "tty"/"auto" heritee du shell est
+# remplacee, car c'est precisement elle qui provoque l'echec).
+case "${COMPOSE_PROGRESS:-}" in plain|quiet|json) ;; *) export COMPOSE_PROGRESS=plain ;; esac
+case "${BUILDKIT_PROGRESS:-}" in plain|quiet|rawjson) ;; *) export BUILDKIT_PROGRESS=plain ;; esac
 
 # $USER n'est pas toujours exporte (ex: session via "docker exec", certains
 # environnements SSH/cloud minimalistes) : sans repli, set -u fait planter le
@@ -535,6 +538,125 @@ install_docker_linux() {
   reexec_under_docker_group
 }
 
+# --- macOS : installation/demarrage de Docker sans intervention ------------
+# Docker Desktop exige un mot de passe administrateur et une acceptation de
+# licence graphique au premier lancement : impossible en mode automatique.
+# Si Docker est absent et que Homebrew est disponible, on installe donc
+# Colima (VM Docker legere, sans sudo) + docker CLI + compose + buildx.
+# Si Docker Desktop est deja installe, on le lance simplement.
+
+# Le docker installe par Homebrew ne trouve pas les plugins "compose" et
+# "buildx" tant que leur dossier n'est pas declare dans ~/.docker/config.json
+# (symptome : "docker: unknown command: docker compose").
+macos_register_brew_docker_plugins() {
+  command -v brew >/dev/null 2>&1 || return 0
+  local plugins_dir config_file
+  plugins_dir="$(brew --prefix)/lib/docker/cli-plugins"
+  config_file="${HOME}/.docker/config.json"
+  [[ -d "$plugins_dir" ]] || return 0
+  mkdir -p "${HOME}/.docker"
+  if [[ ! -s "$config_file" ]]; then
+    printf '{\n  "cliPluginsExtraDirs": ["%s"]\n}\n' "$plugins_dir" > "$config_file"
+    echo "Plugins Docker Homebrew declares dans ${config_file}." >&2
+    return 0
+  fi
+  grep -q "$plugins_dir" "$config_file" 2>/dev/null && return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$config_file" "$plugins_dir" <<'PY' && echo "Plugins Docker Homebrew ajoutes a ${config_file}." >&2
+import json, sys
+path, plugins = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    data = json.load(fh)
+dirs = data.setdefault("cliPluginsExtraDirs", [])
+if plugins not in dirs:
+    dirs.append(plugins)
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+PY
+  fi
+}
+
+# Ressources de la VM Colima : Ollama charge le modele en RAM, la valeur par
+# defaut de Colima (2 CPU / 2 Go) provoque des OOM ("signal: killed").
+macos_colima_start() {
+  local total_gb cpu mem
+  total_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1073741824 ))
+  cpu="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+  (( cpu > 8 )) && cpu=8
+  (( cpu < 2 )) && cpu=2
+  mem=$(( total_gb / 2 ))
+  (( mem < 4 )) && mem=4
+  (( mem > 16 )) && mem=16
+  echo "Demarrage de Colima (${cpu} CPU, ${mem} Go RAM, 100 Go disque)..." >&2
+  colima start --cpu "$cpu" --memory "$mem" --disk 100 >&2 || colima start >&2
+}
+
+macos_install_docker() {
+  if [[ -d /Applications/Docker.app ]]; then
+    return 0
+  fi
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Docker n'est pas installe et Homebrew est absent." >&2
+    echo "-> Installez Docker Desktop : https://www.docker.com/products/docker-desktop/" >&2
+    echo "   ou Homebrew (https://brew.sh) puis relancez ce script : il installera Docker automatiquement." >&2
+    exit 1
+  fi
+  echo "Docker absent : installation automatique via Homebrew (Colima + docker + compose + buildx, sans sudo)..." >&2
+  brew install colima docker docker-compose docker-buildx >&2 || {
+    echo "Echec de l'installation Homebrew de Docker." >&2
+    echo "-> Installez Docker Desktop manuellement : https://www.docker.com/products/docker-desktop/" >&2
+    exit 1
+  }
+  macos_register_brew_docker_plugins
+}
+
+# Tente de demarrer le moteur Docker sur macOS (Docker Desktop ou Colima) et
+# attend jusqu'a 120s qu'il reponde.
+macos_start_docker_engine() {
+  if [[ -d /Applications/Docker.app ]] && ! command -v colima >/dev/null 2>&1; then
+    echo "-> Lancement de Docker Desktop..." >&2
+    open -a Docker >/dev/null 2>&1 || true
+  elif command -v colima >/dev/null 2>&1; then
+    macos_colima_start
+    docker context use colima >/dev/null 2>&1 || true
+  elif [[ -d /Applications/Docker.app ]]; then
+    open -a Docker >/dev/null 2>&1 || true
+  else
+    return 1
+  fi
+  local attempt
+  for attempt in $(seq 1 60); do
+    docker info >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# macOS + iCloud Drive ("Bureau et Documents" synchronises, option
+# "Optimiser le stockage") : les fichiers peu utilises sont evinces du disque
+# (drapeau "dataless"). Le macOS hote les retelecharge a la lecture, mais la VM
+# Docker (Colima/Docker Desktop) recoit "Resource deadlock avoided"
+# (errno -35, EDEADLK) : le backend plante en boucle au demarrage sur
+# logger.js ou SQLite. On force le telechargement des dossiers montes.
+macos_materialize_icloud_files() {
+  [[ "$(detect_os_label)" == "macOS" ]] || return 0
+  local targets=() target count
+  for target in backend/data backend/uploads backend/logs version.json update.config.json .env docker-compose.yml; do
+    [[ -e "$ROOT_DIR/$target" ]] && targets+=("$ROOT_DIR/$target")
+  done
+  (( ${#targets[@]} )) || return 0
+  count="$(find "${targets[@]}" -flags +dataless -type f 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "${count:-0}" -gt 0 ]] || return 0
+  echo "iCloud Drive : ${count} fichier(s) du projet ne sont pas presents sur le disque (stockage optimise)." >&2
+  echo "-> Telechargement force (sinon Docker echoue avec 'Unknown system error -35')..." >&2
+  find "${targets[@]}" -flags +dataless -type f -print0 2>/dev/null | xargs -0 -n 20 -P 8 cat >/dev/null 2>&1 || true
+  count="$(find "${targets[@]}" -flags +dataless -type f 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${count:-0}" -gt 0 ]]; then
+    echo "ATTENTION : ${count} fichier(s) restent absents du disque (iCloud hors ligne ?)." >&2
+  fi
+  echo "-> Conseil : deplacez le projet hors d'un dossier synchronise par iCloud (ex : ~/fablab-ai), sinon macOS peut a nouveau evincer ces fichiers." >&2
+}
+
 # Verifie que Docker est present ET que le daemon repond. Sur Debian/Ubuntu,
 # installe Docker automatiquement s'il est absent ; sur les autres OS on
 # prefere orienter plutot que modifier le systeme (installeurs graphiques).
@@ -544,7 +666,10 @@ check_docker() {
 
   if ! command -v docker >/dev/null 2>&1; then
     case "$os_label" in
-      macOS|Windows)
+      macOS)
+        macos_install_docker
+        ;;
+      Windows)
         echo "Docker n'est pas installe sur cette machine (${os_label})." >&2
         echo "-> Installez Docker Desktop : https://www.docker.com/products/docker-desktop/" >&2
         exit 1
@@ -560,10 +685,17 @@ check_docker() {
     esac
   fi
 
+  if [[ "$os_label" == "macOS" ]] && ! docker compose version >/dev/null 2>&1; then
+    macos_register_brew_docker_plugins
+  fi
+
   if ! docker compose version >/dev/null 2>&1; then
     echo "Docker est installe mais le plugin \"docker compose\" (v2) est absent." >&2
     case "$os_label" in
-      macOS|Windows)
+      macOS)
+        echo "-> Docker Desktop : mettez-le a jour (il inclut docker compose). Docker via Homebrew : brew install docker-compose docker-buildx puis relancez." >&2
+        ;;
+      Windows)
         echo "-> Mettez a jour Docker Desktop (il inclut docker compose par defaut) : https://www.docker.com/products/docker-desktop/" >&2
         ;;
       Linux)
@@ -622,6 +754,18 @@ check_docker() {
 
     echo "Impossible de demarrer le service Docker automatiquement." >&2
     echo "-> Demarrez-le manuellement : sudo systemctl start docker" >&2
+    exit 1
+  fi
+
+  if [[ "$os_label" == "macOS" ]]; then
+    echo "-> Tentative de demarrage automatique du moteur Docker (Docker Desktop ou Colima)..." >&2
+    if macos_start_docker_engine; then
+      echo "Moteur Docker demarre avec succes." >&2
+      return 0
+    fi
+    echo "Le moteur Docker ne repond toujours pas apres 120s." >&2
+    echo "-> Docker Desktop : ouvrez l'application, acceptez la licence puis relancez ce script." >&2
+    echo "-> Colima : colima start --cpu 4 --memory 8 puis relancez ce script." >&2
     exit 1
   fi
 
@@ -745,6 +889,7 @@ update_env() {
 }
 
 check_docker
+macos_materialize_icloud_files
 preflight_clear_stale_stack
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -774,6 +919,18 @@ current_updater_token="$(get_env_value "UPDATER_SHARED_TOKEN")"
 if [[ -z "$current_updater_token" ]]; then
   echo "Generation de UPDATER_SHARED_TOKEN (authentification du service de mise a jour)..."
   update_env "UPDATER_SHARED_TOKEN" "$(generate_random_key)"
+fi
+
+# Identite sous laquelle le backend ecrit uploads/logs/data : celle du
+# proprietaire du projet (et non root), pour que les mises a jour et le
+# nettoyage ne demandent jamais sudo. Si install.sh est lance via sudo, on
+# retient quand meme le proprietaire du dossier du projet.
+project_owner_uid="$(stat -c %u "$ROOT_DIR" 2>/dev/null || stat -f %u "$ROOT_DIR" 2>/dev/null || id -u)"
+project_owner_gid="$(stat -c %g "$ROOT_DIR" 2>/dev/null || stat -f %g "$ROOT_DIR" 2>/dev/null || id -g)"
+if [[ "$(get_env_value "APP_UID")" != "$project_owner_uid" || "$(get_env_value "APP_GID")" != "$project_owner_gid" ]]; then
+  echo "Identite des fichiers du backend : ${project_owner_uid}:${project_owner_gid} (proprietaire du projet)."
+  update_env "APP_UID" "$project_owner_uid"
+  update_env "APP_GID" "$project_owner_gid"
 fi
 
 current_owner_password="$(get_env_value "OWNER_BOOTSTRAP_PASSWORD")"
@@ -824,8 +981,16 @@ image_exists_locally() {
 build_service_or_reuse_local() {
   local service_name="$1"
   local image_name="$2"
+  local -a progress_args=()
 
-  if docker compose -f "$ROOT_DIR/docker-compose.yml" build "$service_name" >/dev/null; then
+  # En plus de COMPOSE_PROGRESS (voir en tete de script), l'option explicite
+  # protege contre un environnement qui la surchargerait. Verifiee avant usage :
+  # une tres ancienne version de compose refuserait l'option inconnue.
+  if docker compose build --help 2>/dev/null | grep -q -- '--progress'; then
+    progress_args=(--progress plain)
+  fi
+
+  if docker compose -f "$ROOT_DIR/docker-compose.yml" build ${progress_args[@]+"${progress_args[@]}"} "$service_name" >/dev/null; then
     return 0
   fi
 

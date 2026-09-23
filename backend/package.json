@@ -1,6 +1,6 @@
 {
   "name": "assistant-ia-backend",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
+    "test": "node --test tests/*.test.js",
     "dev": "node --watch server.js",
     "password:reset-teacher": "node scripts/reset-teacher-password.js",
     "import:site": "node scripts/import-site-from-sitemap.js"

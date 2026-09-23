@@ -1,3 +1,80 @@
+Version 1.1.5 — pièces jointes du chat rétablies et fiabilisées, mises à jour sans sudo
+(23 septembre 2026).
+
+Pièces jointes du chat (verrou de la v1.1.2 levé) :
+- Formats acceptés : txt, md, csv, log, PDF, Word (.docx) et Excel (.xlsx),
+  5 Mo max par fichier, 3 fichiers par question.
+- L'assistant lit le fichier et s'en sert pour répondre, y compris aux
+  questions de suivi de la même conversation.
+- Tant qu'un référent ne l'a pas triée, une pièce jointe ne sert qu'à la
+  conversation qui l'a déposée. « Conserver » la rend utile à tous ;
+  « Détruire » supprime le fichier, son index et son enregistrement.
+- Sécurité : le contenu réel est vérifié (un exécutable renommé en .pdf ou un
+  binaire renommé en .txt est refusé), la pièce jointe d'une autre
+  conversation ne peut plus être injectée en devinant son identifiant, et le
+  contenu est présenté au modèle comme des données, jamais comme des
+  consignes. Quota global et espace disque minimal contrôlés.
+- Indexation fiabilisée : file séquentielle qui laisse passer les
+  conversations en cours, 3 essais automatiques, reprise au démarrage des
+  indexations interrompues.
+- Administration : aperçu du texte extrait, téléchargement, état
+  d'indexation, bouton « Réindexer », sélection multiple avec « Conserver la
+  sélection » / « Détruire la sélection ».
+
+Mises à jour sans sudo côté serveur :
+- Le backend ne tourne plus en root : il rend uploads/, logs/ et data/ au
+  propriétaire du projet (APP_UID/APP_GID, renseignés par install.sh) puis
+  abandonne ses droits. Les fichiers déjà créés en root sont réparés au
+  démarrage.
+- L'updater rend le projet à son propriétaire après chaque mise à jour et
+  restauration.
+- doctor.sh détecte les fichiers appartenant à un autre utilisateur et les
+  répare via Docker, sans sudo.
+
+Erreur « failed to get console » à l'installation (correction définitive) :
+- Le correctif de la v1.1.4 était sans effet avec Docker Compose récent
+  (v2.2x et suivantes, v5) : Compose ignore BUILDKIT_PROGRESS et ne lit que
+  COMPOSE_PROGRESS. Le build backend échouait donc toujours dès que
+  l'installation était lancée depuis un terminal.
+- COMPOSE_PROGRESS=plain est désormais forcé (install.sh, .project-tools.sh,
+  service de mise à jour), y compris quand le shell hérite d'une valeur
+  « tty » ou « auto » ; install.sh passe aussi --progress plain au build.
+- Le journal de construction reste visible : un vrai échec de build (réseau,
+  paquet indisponible) affiche désormais sa cause au lieu d'être masqué.
+- doctor.sh vérifie COMPOSE_PROGRESS ; tests/test-scripts.sh couvre le cas
+  (RUN_DOCKER_TESTS=1 lance un vrai build sous pseudo-terminal).
+
+Installation macOS (doctor.sh / install.sh / documentation) :
+- Docker installé automatiquement via Homebrew (Colima) si absent, moteur
+  démarré automatiquement, plugins compose/buildx déclarés, VM Colima
+  dimensionnée pour Ollama.
+- Projet placé dans un dossier iCloud : fichiers évincés détectés et
+  téléchargés (évite « Unknown system error -35 »).
+- Faux positif « port 3000 déjà utilisé » avec Colima corrigé.
+
+Système de mise à jour fiabilisé :
+- Le service de mise à jour ne s'arrête plus après une mise à jour lancée
+  depuis l'administration : il se reconstruit via un conteneur auxiliaire
+  au lieu de se couper lui-même en plein redémarrage.
+- La nouvelle version n'est déclarée installée qu'une fois le backend
+  démarré et en bonne santé. En cas d'échec (construction ou démarrage),
+  retour automatique à la version précédente : l'application reste en
+  service et la mise à jour peut être relancée.
+- Téléchargement avec 3 essais et détection d'un transfert bloqué ; délai
+  maximal sur les commandes Docker (plus d'état « en cours » sans fin).
+- Le résultat de la dernière opération survit au redémarrage du service ;
+  une opération interrompue est signalée comme telle.
+- Les services ajoutés ou modifiés dans docker-compose.yml par une nouvelle
+  version sont désormais démarrés (plus seulement backend et updater).
+- Fichiers locaux préservés : .env.* (hors modèles .example), exports,
+  cookie d'administration, node_modules.
+- Important pour cette version : si elle est installée depuis
+  l'administration, c'est encore l'ancien service de mise à jour qui
+  l'applique. Lancez ensuite une fois ./updater.sh (ou ./update.sh) sur le
+  serveur pour redémarrer le service de mise à jour.
+
+---
+
 Version 1.1.4 — correction d'un échec de build backend sur Docker Desktop
 (21 septembre 2026).
 

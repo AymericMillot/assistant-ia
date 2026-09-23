@@ -83,10 +83,14 @@ import {
 import {
   deleteAttachment,
   getAttachment,
+  getAttachmentAbsolutePath,
+  getAttachmentLimits,
   keepAttachment,
   listAttachments,
-  readAttachmentText
+  readAttachmentText,
+  reindexAttachment
 } from "../services/attachmentService.js";
+import { getUserAttachmentById } from "../config/db.js";
 import { getRatingsOverview } from "../services/ratingService.js";
 import {
   removeLinkFromIndex,
@@ -777,7 +781,8 @@ router.get("/attachments", async (_req, res, next) => {
   try {
     res.json({
       attachments: listAttachments(),
-      retentionDays: Number(process.env.USER_ATTACHMENT_RETENTION_DAYS || 30),
+      retentionDays: getAttachmentLimits().retentionDays,
+      limits: getAttachmentLimits(),
       attachmentsEnabled: getSetting("attachmentsEnabled", "true") === "true",
       attachmentsLocked: ATTACHMENTS_TEMPORARILY_DISABLED,
       attachmentsDisabledReason: ATTACHMENTS_TEMPORARILY_DISABLED
@@ -839,6 +844,79 @@ router.get("/attachments/:id", async (req, res, next) => {
   }
 });
 
+// Actions groupees : conserver ou detruire plusieurs pieces jointes d'un coup.
+// Declaree avant les routes "/attachments/:id" pour ne pas etre capturee par elles.
+router.post("/attachments/bulk", async (req, res, next) => {
+  try {
+    const action = String(req.body?.action || "");
+    if (!["keep", "delete"].includes(action)) {
+      return res.status(400).json({ message: "Action inconnue (keep ou delete attendu)." });
+    }
+
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.slice(0, 200) : [];
+    const attachmentIds = [...new Set(ids.map((value) => parsePositiveInt(value, "Pièce jointe")))];
+    if (attachmentIds.length === 0) {
+      return res.status(400).json({ message: "Aucune pièce jointe sélectionnée." });
+    }
+
+    markActivity();
+    let processed = 0;
+    const failures = [];
+    for (const attachmentId of attachmentIds) {
+      try {
+        if (action === "keep") {
+          keepAttachment(attachmentId);
+        } else {
+          await deleteAttachment(attachmentId);
+        }
+        processed += 1;
+      } catch (error) {
+        failures.push({ id: attachmentId, message: error.message });
+      }
+    }
+
+    res.json({
+      message:
+        action === "keep"
+          ? `${processed} pièce(s) jointe(s) conservée(s).`
+          : `${processed} pièce(s) jointe(s) détruite(s) définitivement.`,
+      processed,
+      failures
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/attachments/:id/download", async (req, res, next) => {
+  try {
+    const attachmentId = parsePositiveInt(req.params.id, "Pièce jointe");
+    const row = getUserAttachmentById(attachmentId);
+    if (!row) {
+      return res.status(404).json({ message: "Pièce jointe introuvable." });
+    }
+
+    res.download(getAttachmentAbsolutePath(row), row.original_name);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/attachments/:id/reindex", async (req, res, next) => {
+  try {
+    const attachmentId = parsePositiveInt(req.params.id, "Pièce jointe");
+    markActivity();
+    const attachment = reindexAttachment(attachmentId);
+
+    res.json({
+      message: "Réindexation de la pièce jointe planifiée.",
+      attachment
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/attachments/:id/keep", async (req, res, next) => {
   try {
     const attachmentId = parsePositiveInt(req.params.id, "Pièce jointe");
@@ -846,7 +924,8 @@ router.post("/attachments/:id/keep", async (req, res, next) => {
     const attachment = keepAttachment(attachmentId);
 
     res.json({
-      message: "Pièce jointe conservée. Elle restera disponible pour l'assistant.",
+      message:
+        "Pièce jointe conservée : elle est réindexée et servira désormais aux réponses de tous les utilisateurs.",
       attachment
     });
   } catch (error) {

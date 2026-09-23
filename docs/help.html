@@ -484,7 +484,7 @@
           <li>La page d'accueil permet de poser une question en langage naturel ; l'assistant répond en s'appuyant sur les documents indexés.</li>
           <li>Les échanges ne sont pas conservés après fermeture de la page (confidentialité).</li>
           <li>Un pouce 👍/👎 sur chaque réponse aide l'assistant à s'améliorer au fil du temps.</li>
-          <li>Une pièce jointe (texte ou PDF) peut être envoyée par un utilisateur pour enrichir le contexte d'une question ponctuelle — l'administrateur peut désactiver cette possibilité depuis l'onglet Pièces jointes.</li>
+          <li>Un utilisateur peut joindre un fichier (txt, md, csv, log, PDF, Word .docx, Excel .xlsx — 5 Mo max, 3 par question) : l'assistant le lit et s'en sert pour répondre, y compris aux questions de suivi de la même conversation. Tant qu'un référent ne l'a pas conservé, le fichier ne sert qu'à cette conversation. L'administrateur peut désactiver cette possibilité depuis l'onglet Pièces jointes.</li>
           <li>Quand l'assistant n'a ni document interne ni connaissance générale fiable pour répondre, il le dit clairement ("je ne sais pas...") et propose un lien de recherche externe, plutôt que d'inventer une réponse ou de suggérer systématiquement une recherche Internet.</li>
         </ul>
       </section>
@@ -520,7 +520,15 @@
         <p>Changez le modèle de conversation depuis l'onglet Modèles. Les modèles Mistral AI (Mistral, Mixtral, Codestral, Ministral, Devstral, Pixtral, Magistral) sont repérés par un petit drapeau français.</p>
 
         <h3>Pièces jointes</h3>
-        <p>L'onglet Pièces jointes permet d'activer ou de désactiver globalement la possibilité pour les utilisateurs de joindre un fichier dans le chat, et de trier (conserver ou supprimer) les fichiers déjà envoyés.</p>
+        <p>L'onglet Pièces jointes permet d'activer ou de désactiver globalement la possibilité pour les utilisateurs de joindre un fichier dans le chat, et de trier les fichiers déjà envoyés :</p>
+        <ul>
+          <li><strong>Voir le contenu</strong> (texte extrait) ou <strong>Télécharger</strong> le fichier d'origine.</li>
+          <li><strong>Conserver</strong> : le fichier est gardé sans limite de durée et sert désormais aux réponses de tous les utilisateurs.</li>
+          <li><strong>Détruire</strong> : le fichier, son index et son enregistrement sont supprimés définitivement.</li>
+          <li>Actions groupées : cochez plusieurs fichiers puis « Conserver la sélection » ou « Détruire la sélection ».</li>
+          <li>Sans tri, un fichier est supprimé automatiquement après 30 jours (<code>USER_ATTACHMENT_RETENTION_DAYS</code>).</li>
+          <li>Si l'indexation échoue (3 essais automatiques), un bouton <strong>Réindexer</strong> apparaît. Les indexations interrompues par un redémarrage reprennent seules.</li>
+        </ul>
 
         <h3>Export et déploiement</h3>
         <p>La note de version se pré-remplit automatiquement (date, heure, numéro de version) et reste enregistrée dans le navigateur tant que la version n'est pas publiée — vous n'avez jamais besoin d'écrire quelque chose à la main pour publier.</p>

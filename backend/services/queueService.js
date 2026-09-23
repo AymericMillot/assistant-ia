@@ -398,6 +398,7 @@ export async function processDirectChatRequest({
   folderName,
   history = [],
   attachmentIds = [],
+  sessionId = null,
   useReasoningModel = false,
   persistExchange = null
 }) {
@@ -437,10 +438,16 @@ export async function processDirectChatRequest({
   };
 
   try {
+    // Les pieces jointes de la conversation (question en cours + depots
+    // precedents de la meme session) sont lues avant la recherche documentaire.
+    const attachmentContext = await buildAttachmentPromptContext({ attachmentIds, sessionId }).catch(
+      () => null
+    );
     const { messages, promptPreview, sources, responseOverride, grounding, retrieval } = await ragService.buildRagPayload(
       question,
       folderName,
-      history
+      history,
+      { sessionId, hasAttachments: Boolean(attachmentContext) }
     );
 
     if (responseOverride !== undefined && responseOverride !== null) {
@@ -496,15 +503,12 @@ export async function processDirectChatRequest({
       };
     }
 
-    // Les pieces jointes envoyees avec la question sont injectees comme contexte prioritaire.
-    if (Array.isArray(attachmentIds) && attachmentIds.length > 0) {
-      const attachmentContext = await buildAttachmentPromptContext(attachmentIds).catch(() => null);
-      if (attachmentContext) {
-        messages.splice(messages.length - 1, 0, {
-          role: "system",
-          content: attachmentContext
-        });
-      }
+    // Les pieces jointes sont injectees juste avant la question de l'utilisateur.
+    if (attachmentContext) {
+      messages.splice(messages.length - 1, 0, {
+        role: "system",
+        content: attachmentContext
+      });
     }
 
     const { text, payload } = await ollamaService.streamChatAnswer(
@@ -603,25 +607,27 @@ export async function generateChatResponse({
   folderName = "all",
   history = [],
   attachmentIds = [],
+  sessionId = null,
   useReasoningModel = false
 }) {
   const reasoningModelName = useReasoningModel ? ollamaService.getActiveModelByRole("reasoning") : "";
   const modelName = reasoningModelName || ollamaService.getActiveModel();
   const startTime = Date.now();
+  const attachmentContext = await buildAttachmentPromptContext({ attachmentIds, sessionId }).catch(
+    () => null
+  );
   const { messages, promptPreview, sources, responseOverride, grounding, retrieval } = await ragService.buildRagPayload(
     question,
     folderName,
-    history
+    history,
+    { sessionId, hasAttachments: Boolean(attachmentContext) }
   );
 
-  if (messages && Array.isArray(attachmentIds) && attachmentIds.length > 0) {
-    const attachmentContext = await buildAttachmentPromptContext(attachmentIds).catch(() => null);
-    if (attachmentContext) {
-      messages.splice(messages.length - 1, 0, {
-        role: "system",
-        content: attachmentContext
-      });
-    }
+  if (messages && attachmentContext) {
+    messages.splice(messages.length - 1, 0, {
+      role: "system",
+      content: attachmentContext
+    });
   }
 
   if (responseOverride !== undefined && responseOverride !== null) {

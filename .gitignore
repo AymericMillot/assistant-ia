@@ -32,6 +32,7 @@ export
 release
 .update-backups
 .update-release-cache.json
+.update-state.json
 
 # --- Outils locaux (non partages) ---
 .claude

@@ -56,6 +56,23 @@ const hostWorkspaceDirOverride = String(process.env.UPDATE_HOST_WORKSPACE_DIR ||
 // chaque mise a jour/rollback pour repartir sur un etat propre, comme ./restart.sh.
 const fullStackRestartServices = ["ollama", "chromadb", "redis"];
 const remoteFetchTimeoutMs = Math.max(1000, Number(process.env.UPDATE_REMOTE_TIMEOUT_MS || 8000));
+// Telechargement de l'archive : nombre d'essais, et delai sans aucun octet recu
+// au-dela duquel le transfert est considere comme bloque (sans ce garde-fou, un
+// flux qui ne progresse plus laisserait la mise a jour "occupee" indefiniment).
+const downloadAttempts = Math.max(1, Number(process.env.UPDATE_DOWNLOAD_ATTEMPTS || 3));
+const downloadStallTimeoutMs = Math.max(5000, Number(process.env.UPDATE_DOWNLOAD_STALL_TIMEOUT_MS || 60000));
+// Duree maximale d'une commande docker compose (build compris) : au-dela, elle
+// est interrompue plutot que de bloquer l'updater dans l'etat "busy".
+const composeTimeoutMs = Math.max(60000, Number(process.env.UPDATE_COMPOSE_TIMEOUT_MS || 30 * 60 * 1000));
+// Delai laisse au backend pour devenir "healthy" apres reconstruction. Le
+// healthcheck compose (start_period 30 s, puis 10 essais toutes les 15 s) ne
+// declare "unhealthy" qu'apres ~3 min : on attend un peu plus longtemps.
+const backendHealthTimeoutMs = Math.max(30000, Number(process.env.UPDATE_BACKEND_HEALTH_TIMEOUT_MS || 5 * 60 * 1000));
+// Etat de la derniere operation, persiste sur disque : l'updater se reconstruit
+// lui-meme en fin de mise a jour, et l'interface doit pouvoir lire le resultat
+// final (termine / erreur / interrompue) apres ce redemarrage.
+const stateFilePath = path.join(workspaceDir, ".update-state.json");
+const restoredStateMaxAgeMs = 60 * 60 * 1000;
 // 5 min par defaut : plancher de fraicheur du cache. Le TTL reellement applique
 // (voir effectiveReleaseTtlMs) est releve pour ne jamais depasser le plafond
 // quotidien d'appels a l'API GitHub.
@@ -130,6 +147,66 @@ function setDeployState(patch) {
 
 function setState(patch) {
   Object.assign(state, patch);
+  // Debut (busy: true) et fin (busy: false) d'operation : on persiste l'etat.
+  if (Object.prototype.hasOwnProperty.call(patch, "busy")) {
+    persistState();
+  }
+}
+
+function persistState() {
+  const snapshot = JSON.stringify({ ...state, savedAt: new Date().toISOString() });
+  fsp
+    .writeFile(stateFilePath, snapshot, "utf8")
+    .catch(() => {
+      // Best effort : un echec d'ecriture ne doit pas casser la mise a jour.
+    });
+}
+
+async function restorePersistedState() {
+  const saved = await readJson(stateFilePath, null);
+  if (!saved || typeof saved !== "object") {
+    return;
+  }
+
+  if (saved.busy) {
+    // Le conteneur a ete arrete en pleine operation (redemarrage de l'hote,
+    // docker stop...). On le signale au lieu de repartir sur un "Pret." muet.
+    Object.assign(state, {
+      busy: false,
+      status: "error",
+      progress: 100,
+      message:
+        "La derniere operation de mise a jour a ete interrompue (redemarrage du service). " +
+        "Relancez-la depuis l'administration ou lancez ./update.sh sur le serveur.",
+      error: "interrupted",
+      targetVersion: saved.targetVersion || null,
+      logs: Array.isArray(saved.logs) ? saved.logs : [],
+      startedAt: saved.startedAt || null,
+      completedAt: new Date().toISOString()
+    });
+    persistState();
+    return;
+  }
+
+  const completedAt = new Date(saved.completedAt || 0).getTime() || 0;
+  if (Date.now() - completedAt > restoredStateMaxAgeMs) {
+    return;
+  }
+
+  Object.assign(state, {
+    status: saved.status || "idle",
+    progress: Number(saved.progress) || 0,
+    message: saved.message || "Prêt.",
+    error: saved.error || null,
+    targetVersion: saved.targetVersion || null,
+    logs: Array.isArray(saved.logs) ? saved.logs : [],
+    startedAt: saved.startedAt || null,
+    completedAt: saved.completedAt || null
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readJson(filePath, fallbackValue = {}) {
@@ -783,13 +860,52 @@ function shouldPreserve(relativePath, preservePaths) {
   });
 }
 
-async function downloadFile(url, targetPath, headers = {}) {
-  const response = await fetchWithTimeout(url, { headers });
-  if (!response.ok || !response.body) {
-    throw new Error(`Telechargement impossible (${response.status}).`);
-  }
+async function downloadFileOnce(url, targetPath, headers = {}) {
+  const controller = new AbortController();
+  let timer = null;
+  const armTimer = (delayMs, reason) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(new Error(reason)), delayMs);
+  };
 
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+  armTimer(Math.max(remoteFetchTimeoutMs, 30000), "Le serveur de mise a jour ne repond pas.");
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok || !response.body) {
+      throw new Error(`Telechargement impossible (${response.status}).`);
+    }
+
+    // Surveillance de blocage : le delai repart a chaque bloc recu.
+    const stallMessage = `Telechargement bloque (aucune donnee recue depuis ${Math.round(downloadStallTimeoutMs / 1000)} s).`;
+    armTimer(downloadStallTimeoutMs, stallMessage);
+    const body = Readable.fromWeb(response.body);
+    body.on("data", () => armTimer(downloadStallTimeoutMs, stallMessage));
+    await pipeline(body, fs.createWriteStream(targetPath));
+  } catch (error) {
+    throw controller.signal.aborted && controller.signal.reason instanceof Error
+      ? controller.signal.reason
+      : error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function downloadFile(url, targetPath, headers = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= downloadAttempts; attempt += 1) {
+    try {
+      await downloadFileOnce(url, targetPath, headers);
+      return;
+    } catch (error) {
+      lastError = error;
+      await fsp.rm(targetPath, { force: true }).catch(() => {});
+      if (attempt < downloadAttempts) {
+        pushLog(`Téléchargement échoué (essai ${attempt}/${downloadAttempts}) : ${error.message}. Nouvel essai...`);
+        await sleep(attempt * 5000);
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function sha256OfFile(filePath) {
@@ -853,57 +969,6 @@ async function assertSafeArchive(archivePath) {
   }
 }
 
-async function hashDirectoryContents(dirPath) {
-  const hash = crypto.createHash("sha256");
-
-  async function walk(currentPath) {
-    const entries = await fsp.readdir(currentPath, { withFileTypes: true }).catch(() => []);
-    const sortedEntries = entries
-      .filter((entry) => entry.name !== "node_modules")
-      .sort((left, right) => left.name.localeCompare(right.name));
-
-    for (const entry of sortedEntries) {
-      const entryPath = path.join(currentPath, entry.name);
-      const relativePath = path.relative(dirPath, entryPath).replace(/\\/g, "/");
-
-      if (entry.isDirectory()) {
-        await walk(entryPath);
-        continue;
-      }
-
-      if (!entry.isFile()) {
-        continue;
-      }
-
-      hash.update(relativePath);
-      const content = await fsp.readFile(entryPath).catch(() => Buffer.alloc(0));
-      hash.update(content);
-    }
-  }
-
-  await walk(dirPath);
-  return hash.digest("hex");
-}
-
-// L'updater tourne depuis une image Docker construite a partir de updater/ :
-// mettre a jour les fichiers du workspace ne suffit pas a changer son
-// comportement tant que l'image n'est pas reconstruite (--build). Comme ce
-// redemarrage rend le service brievement injoignable, on ne le declenche que
-// si le code de l'updater a reellement change entre l'ancienne et la nouvelle
-// version, au lieu de le faire systematiquement a chaque mise a jour.
-async function hasUpdaterCodeChanged(packageRoot) {
-  try {
-    const [previousHash, nextHash] = await Promise.all([
-      hashDirectoryContents(path.join(workspaceDir, "updater")),
-      hashDirectoryContents(path.join(packageRoot, "updater"))
-    ]);
-    return previousHash !== nextHash;
-  } catch {
-    // En cas de doute, on redemarre par securite.
-    return true;
-  }
-}
-
 function sanitizeServiceNames(services, fallback = ["backend", "updater"]) {
   const candidates = Array.isArray(services) && services.length > 0 ? services : fallback;
   const safeServices = candidates
@@ -955,16 +1020,73 @@ const MANDATORY_PRESERVED_PATHS = [
   "update.config.json",
   "backend/data",
   "backend/uploads",
-  "backend/logs"
+  "backend/logs",
+  // Etat persiste de la derniere operation (voir persistState).
+  ".update-state.json",
+  // Artefacts locaux absents des releases : les effacer serait une perte
+  // (exports construits, cookie d'administration des scripts, dependances
+  // d'une machine de developpement).
+  "assistant-ia-admin-cookie.txt",
+  "export",
+  "release",
+  "backend/node_modules",
+  "frontend/node_modules",
+  "updater/node_modules"
 ];
 
 function isRuntimePreservedPath(relativePath) {
   const normalized = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  return MANDATORY_PRESERVED_PATHS.includes(normalized);
+  if (MANDATORY_PRESERVED_PATHS.includes(normalized)) {
+    return true;
+  }
+  // Tous les fichiers d'environnement locaux (.env.publish, .env.local...) sont
+  // des secrets propres a l'instance ; seuls les modeles *.example viennent
+  // de la release et doivent etre mis a jour.
+  return /^\.env(\..+)?$/.test(normalized) && !normalized.endsWith(".example");
 }
 
 function formatBackupId(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, "-");
+}
+
+// L'updater tourne en root (il pilote Docker via le socket). Sans correction,
+// tout fichier qu'il ecrit dans le projet (code synchronise, sauvegardes,
+// restauration) appartient a root sur l'hote : l'utilisateur du serveur devrait
+// alors passer par sudo pour ./update.sh, git pull ou une suppression. On rend
+// donc le projet a son proprietaire (celui du dossier racine monte).
+async function restoreWorkspaceOwnership(reason = "") {
+  try {
+    const stats = await fsp.stat(workspaceDir);
+    if (stats.uid === 0 || typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return false;
+    }
+
+    await new Promise((resolve, reject) => {
+      const child = spawn("chown", ["-R", `${stats.uid}:${stats.gid}`, workspaceDir], {
+        stdio: ["ignore", "ignore", "pipe"]
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        // Certains fichiers (montages macOS, fichiers verrouilles) peuvent
+        // refuser le chown : non bloquant, on journalise seulement.
+        if (code !== 0 && stderr.trim()) {
+          console.warn(`chown partiel du projet : ${stderr.trim().split("\n").slice(0, 3).join(" | ")}`);
+        }
+        resolve();
+      });
+    });
+    if (reason) {
+      pushLog(`Propriétaire des fichiers du projet rétabli (${stats.uid}:${stats.gid}) ${reason}.`);
+    }
+    return true;
+  } catch (error) {
+    console.warn(`Impossible de rétablir le propriétaire des fichiers : ${error.message}`);
+    return false;
+  }
 }
 
 async function syncTree(sourceRoot, destinationRoot, preservePaths, workspaceRoot = destinationRoot) {
@@ -1058,7 +1180,13 @@ async function createWorkspaceBackup(currentVersion, preservePaths = []) {
     "--exclude=backend/node_modules",
     "--exclude=frontend/node_modules",
     "--exclude=updater/node_modules",
-    "--exclude=.git"
+    "--exclude=.git",
+    // Exports locaux (archives volumineuses) et etat runtime : inutiles au
+    // retour arriere, ils sont de toute facon preserves par syncTree.
+    "--exclude=./export",
+    "--exclude=./release",
+    "--exclude=./.update-state.json",
+    "--exclude=./.update-release-cache.json"
   ];
 
   for (const preservePath of preservePaths) {
@@ -1201,150 +1329,275 @@ async function validatePackageRoot(packageRoot) {
   }
 }
 
-async function runComposeUpdate(services) {
-  const hostWorkspaceDir = await getHostWorkspaceDir();
-  const composeFilePath = path.join(workspaceDir, "docker-compose.yml");
-  const composeEnvironment = {
-    ...process.env,
-    PROJECT_WORKSPACE_DIR: hostWorkspaceDir
-  };
-
+// Execute une commande et renvoie sa sortie standard. Les sorties sont
+// recopiees dans le journal de l'operation (logOutput) et la commande est
+// interrompue au-dela de timeoutMs, pour que l'updater ne reste jamais bloque
+// dans l'etat "busy" sur une commande Docker qui ne rend pas la main.
+function runProcess(command, args, { env = process.env, timeoutMs = 0, logOutput = true } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "docker",
-      [
-        "compose",
-        "-p",
-        composeProjectName,
-        "-f",
-        composeFilePath,
-        "up",
-        "-d",
-        "--build",
-        ...services
-      ],
-      {
-        cwd: workspaceDir,
-        env: composeEnvironment,
-        stdio: ["ignore", "pipe", "pipe"]
-      }
-    );
+    const child = spawn(command, args, {
+      cwd: workspaceDir,
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let timedOut = false;
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGTERM");
+            setTimeout(() => child.kill("SIGKILL"), 10000).unref();
+          }, timeoutMs)
+        : null;
 
     child.stdout.on("data", (chunk) => {
-      pushLog(chunk.toString().trim());
+      stdout += chunk.toString();
+      if (logOutput) {
+        pushLog(chunk.toString().trim());
+      }
     });
     child.stderr.on("data", (chunk) => {
-      pushLog(chunk.toString().trim());
+      if (logOutput) {
+        pushLog(chunk.toString().trim());
+      }
     });
 
-    child.on("error", reject);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
+      clearTimeout(timer);
+      const label = `${command} ${args.slice(0, 2).join(" ")}`.trim();
+      if (timedOut) {
+        reject(new Error(`${label} interrompu après ${Math.round(timeoutMs / 1000)} s sans se terminer.`));
         return;
       }
-
-      reject(new Error(`docker-compose a quitte avec le code ${code}.`));
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      reject(new Error(`${label} a quitté avec le code ${code}.`));
     });
   });
 }
 
-// Redemarre (sans reconstruire) des services qui n'ont pas de code applicatif
-// propre (images tierces : Ollama, ChromaDB, Redis), pour repartir sur un etat
-// completement propre apres chaque mise a jour ou rollback, comme le fait
-// manuellement ./restart.sh.
-async function runComposeRestart(services) {
-  const hostWorkspaceDir = await getHostWorkspaceDir();
-  const composeFilePath = path.join(workspaceDir, "docker-compose.yml");
-  const composeEnvironment = {
-    ...process.env,
-    PROJECT_WORKSPACE_DIR: hostWorkspaceDir
-  };
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "docker",
-      ["compose", "-p", composeProjectName, "-f", composeFilePath, "restart", ...services],
-      {
-        cwd: workspaceDir,
-        env: composeEnvironment,
-        stdio: ["ignore", "pipe", "pipe"]
+// "docker compose" (plugin) de preference, "docker-compose" (binaire autonome,
+// present dans l'image) en secours : une image dont la decouverte du plugin
+// serait cassee (cas corrige en v1.0.2) peut ainsi toujours se reparer.
+let composeCommandPromise = null;
+function getComposeCommand() {
+  if (!composeCommandPromise) {
+    composeCommandPromise = (async () => {
+      const candidates = [
+        ["docker", "compose"],
+        ["docker-compose"]
+      ];
+      for (const [command, ...prefix] of candidates) {
+        try {
+          await runProcess(command, [...prefix, "version"], { logOutput: false, timeoutMs: 15000 });
+          return [command, ...prefix];
+        } catch {
+          // Candidat suivant.
+        }
       }
-    );
-
-    child.stdout.on("data", (chunk) => {
-      pushLog(chunk.toString().trim());
-    });
-    child.stderr.on("data", (chunk) => {
-      pushLog(chunk.toString().trim());
-    });
-
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error(`docker-compose restart a quitte avec le code ${code}.`));
-    });
-  });
+      return candidates[0];
+    })();
+  }
+  return composeCommandPromise;
 }
 
-function triggerDetachedComposeUpdate(services) {
-  if (!Array.isArray(services) || services.length === 0) {
-    return;
+async function runCompose(args, options = {}) {
+  const hostWorkspaceDir = await getHostWorkspaceDir();
+  const [command, ...prefix] = await getComposeCommand();
+  return runProcess(
+    command,
+    [...prefix, "-p", composeProjectName, "-f", path.join(workspaceDir, "docker-compose.yml"), ...args],
+    {
+      env: {
+        ...process.env,
+        PROJECT_WORKSPACE_DIR: hostWorkspaceDir,
+        BUILDKIT_PROGRESS: process.env.BUILDKIT_PROGRESS || "plain",
+        COMPOSE_PROGRESS: process.env.COMPOSE_PROGRESS || "plain"
+      },
+      timeoutMs: composeTimeoutMs,
+      ...options
+    }
+  );
+}
+
+// Services a (re)demarrer apres un changement de fichiers : ceux declares par
+// le docker-compose.yml qui vient d'etre installe (une nouvelle version peut
+// ajouter un service ou modifier celui d'Ollama/ChromaDB/Redis), a defaut ceux
+// de update.config.json. Les services sous "profile" (frontend de dev) ne sont
+// pas listes par "config --services" et restent donc a l'ecart.
+async function resolveApplicationServices(config) {
+  let declared = [];
+  try {
+    declared = (await runCompose(["config", "--services"], { logOutput: false, timeoutMs: 60000 }))
+      .split("\n")
+      .map((service) => service.trim())
+      .filter((service) => /^[a-zA-Z0-9_-]+$/.test(service));
+  } catch (error) {
+    pushLog(`Liste des services docker-compose indisponible (${error.message}) : services de update.config.json utilisés.`);
   }
 
-  getHostWorkspaceDir()
-    .then((hostWorkspaceDir) => {
-      const child = spawn(
-        "sh",
-        [
-          "-lc",
-          `PROJECT_WORKSPACE_DIR="${hostWorkspaceDir}" docker-compose -p "${composeProjectName}" -f "${path.join(workspaceDir, "docker-compose.yml")}" up -d --build ${services
-            .map((service) => `"${service}"`)
-            .join(" ")} >/tmp/assistant-ia-updater-detached.log 2>&1 &`
-        ],
-        {
-          cwd: workspaceDir,
-          detached: true,
-          stdio: "ignore"
-        }
-      );
+  const services = declared.length > 0 ? declared : sanitizeServiceNames(config?.apply?.services);
+  return {
+    immediate: services.filter((service) => service !== "updater"),
+    includesUpdater: services.includes("updater")
+  };
+}
 
-      child.unref();
-    })
-    .catch((error) => {
-      pushLog(`Redémarrage différé impossible : ${error.message}`);
-    });
+// Attend que le backend reconstruit soit reellement operationnel, d'apres le
+// healthcheck Docker (curl interne au conteneur : insensible au proxy sortant
+// eventuellement configure pour l'updater).
+async function waitForBackendHealthy() {
+  const deadline = Date.now() + backendHealthTimeoutMs;
+  let lastState = "inconnu";
+
+  while (Date.now() < deadline) {
+    try {
+      const containerId = (await runCompose(["ps", "-q", "backend"], { logOutput: false, timeoutMs: 30000 }))
+        .trim()
+        .split("\n")[0];
+      if (containerId) {
+        const inspect = (
+          await runProcess(
+            "docker",
+            ["inspect", "--format", "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}", containerId],
+            { logOutput: false, timeoutMs: 30000 }
+          )
+        ).trim();
+        const [status, health] = inspect.split("|");
+        lastState = health ? `${status}, ${health}` : status;
+        if (status === "running" && (health === "healthy" || !health)) {
+          return;
+        }
+        if (health === "unhealthy") {
+          break;
+        }
+      } else {
+        lastState = "conteneur absent";
+      }
+    } catch (error) {
+      lastState = error.message;
+    }
+    await sleep(3000);
+  }
+
+  try {
+    pushLog("Derniers logs du backend :");
+    await runCompose(["logs", "--no-color", "--tail", "40", "backend"], { timeoutMs: 30000 });
+  } catch {
+    // Diagnostic best effort.
+  }
+  throw new Error(`Le backend ne démarre pas correctement (état : ${lastState}).`);
+}
+
+// Reconstruit et redemarre la pile applicative apres un changement de fichiers
+// (mise a jour ou retour arriere), puis verifie que le backend repond.
+// L'updater n'est pas traite ici : voir scheduleUpdaterSelfRebuild.
+async function restartApplicationStack(config) {
+  const { immediate, includesUpdater } = await resolveApplicationServices(config);
+
+  // Services tiers redemarres AVANT la reconstruction : "up" attend ensuite
+  // qu'ils soient "healthy" (depends_on) avant de lancer le nouveau backend.
+  const thirdParty = fullStackRestartServices.filter((service) => immediate.includes(service));
+  if (thirdParty.length > 0) {
+    try {
+      await runCompose(["restart", ...thirdParty]);
+      pushLog(`${thirdParty.join(", ")} redémarrés.`);
+    } catch (error) {
+      pushLog(`Redémarrage des services tiers ignoré : ${error.message}`);
+    }
+  }
+
+  await runCompose(["up", "-d", "--build", ...immediate]);
+  setState({ progress: 88, message: "Vérification du démarrage des services..." });
+  await waitForBackendHealthy();
+  return { includesUpdater };
+}
+
+// L'updater ne peut pas se recreer lui-meme : "docker compose up" arrete
+// l'ancien conteneur AVANT de demarrer le nouveau, ce qui tue la commande
+// compose lancee depuis ce conteneur et laisse l'updater arrete (verifie : le
+// nouveau conteneur reste bloque a l'etat "Created"). La reconstruction est
+// donc confiee a un conteneur auxiliaire ephemere, hors du projet compose,
+// lance depuis la meme image (docker CLI + compose). Compose ne recree
+// l'updater que si son image ou sa configuration a change.
+async function scheduleUpdaterSelfRebuild() {
+  const helperName = `${composeProjectName}-updater-rebuild`;
+  try {
+    const hostWorkspaceDir = await getHostWorkspaceDir();
+    const selfId = String(process.env.HOSTNAME || "").trim();
+    if (!selfId || (!hostWorkspaceDirOverride && hostWorkspaceDir === workspaceDir)) {
+      throw new Error("dossier du projet sur l'hôte introuvable");
+    }
+
+    const image = (
+      await runProcess("docker", ["inspect", selfId, "--format", "{{.Image}}"], { logOutput: false, timeoutMs: 30000 })
+    ).trim();
+    await runProcess("docker", ["rm", "-f", helperName], { logOutput: false, timeoutMs: 30000 }).catch(() => {});
+
+    const composeArgs = '-p "$UPDATE_PROJECT_NAME" -f /workspace/docker-compose.yml up -d --build updater';
+    const proxyEnv = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+      .filter((key) => process.env[key])
+      .flatMap((key) => ["-e", `${key}=${process.env[key]}`]);
+
+    // Pas de --rm : "docker logs <helper>" reste disponible pour le diagnostic ;
+    // le conteneur termine est supprime au lancement suivant (rm -f ci-dessus).
+    await runProcess(
+      "docker",
+      [
+        "run",
+        "-d",
+        "--name",
+        helperName,
+        "-v",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "-v",
+        `${hostWorkspaceDir}:/workspace`,
+        "-w",
+        "/workspace",
+        "-e",
+        `PROJECT_WORKSPACE_DIR=${hostWorkspaceDir}`,
+        "-e",
+        `UPDATE_PROJECT_NAME=${composeProjectName}`,
+        "-e",
+        "BUILDKIT_PROGRESS=plain",
+        "-e",
+        "COMPOSE_PROGRESS=plain",
+        ...proxyEnv,
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        // Courte pause : laisse l'interface lire l'etat final avant le
+        // remplacement du conteneur (l'etat est de toute facon persiste).
+        `sleep 5; docker compose ${composeArgs} || docker-compose ${composeArgs}`
+      ],
+      { logOutput: false, timeoutMs: 60000 }
+    );
+    pushLog(`Reconstruction du service de mise à jour lancée en arrière-plan (docker logs ${helperName}).`);
+    return true;
+  } catch (error) {
+    pushLog(
+      `Reconstruction du service de mise à jour non lancée (${error.message}) : ` +
+        "l'application est à jour, le service de mise à jour sera reconstruit au prochain ./update.sh."
+    );
+    return false;
+  }
 }
 
 async function restoreBackupArchive(archivePath, preservePaths = []) {
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-rollback-"));
   try {
     const extractRoot = path.join(tempRoot, "extract");
-    await ensureDir(extractRoot);
-
-    await new Promise((resolve, reject) => {
-      const child = spawn("tar", ["-xzf", archivePath, "-C", extractRoot], {
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      child.stdout.on("data", (chunk) => pushLog(chunk.toString().trim()));
-      child.stderr.on("data", (chunk) => pushLog(chunk.toString().trim()));
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(new Error(`Extraction de la sauvegarde impossible (code ${code}).`));
-      });
-    });
-
-    const updaterCodeChanged = await hasUpdaterCodeChanged(extractRoot);
+    await extractArchive(archivePath, extractRoot);
     await syncTree(extractRoot, workspaceDir, preservePaths || []);
-    return { updaterCodeChanged };
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
   }
@@ -1445,6 +1698,22 @@ async function buildStatus() {
   }
 }
 
+async function extractArchive(archivePath, extractRoot) {
+  await ensureDir(extractRoot);
+  await runProcess("tar", ["-xzf", archivePath, "-C", extractRoot], { timeoutMs: 10 * 60 * 1000 });
+}
+
+// Remet en place les fichiers d'une sauvegarde puis reconstruit les services.
+// Sert au retour arriere manuel ET au retour automatique apres un echec.
+async function restoreBackupAndRestart(backup, config) {
+  // Chemin recalcule depuis l'id : les metadonnees renvoyees par
+  // createWorkspaceBackup ne portent pas archivePath (seul listBackups l'ajoute).
+  const archivePath = path.join(backupStoreDir, backup.id, "workspace.tar.gz");
+  await restoreBackupArchive(archivePath, config?.apply?.preservePaths || []);
+  await restoreWorkspaceOwnership("après restauration");
+  return restartApplicationStack(config);
+}
+
 async function applyUpdateInBackground(targetVersion = "") {
   invalidateRemoteReleaseCache();
   setState({
@@ -1453,24 +1722,33 @@ async function applyUpdateInBackground(targetVersion = "") {
     progress: 5,
     message: "Vérification de la mise à jour...",
     error: null,
+    filesSynced: false,
+    recoverableBackupId: "",
     startedAt: new Date().toISOString(),
     completedAt: null,
     logs: []
   });
   pushLog("Début de la procédure de mise à jour.");
 
-  // Suivi pour le diagnostic : si l'echec survient APRES syncTree (typiquement
-  // un "docker compose up --build" qui casse), le code sur disque est deja a
-  // jour mais les conteneurs tournent encore l'ancienne version. L'operateur
-  // doit alors soit relancer la mise a jour, soit revenir a la sauvegarde.
-  let filesSynced = false;
-  let rollbackBackupId = "";
+  // Des que la synchronisation des fichiers a commence, un echec laisserait un
+  // projet incoherent (nouveaux fichiers, anciens conteneurs ou backend qui ne
+  // demarre pas) : on revient alors automatiquement a la sauvegarde prise
+  // juste avant.
+  let config = null;
+  let backup = null;
+  let workspaceTouched = false;
+  let currentVersion = "";
+  let targetReleaseVersion = "";
+  let tempRoot = "";
+  let rebuildUpdater = false;
 
   try {
     const requestedVersion = String(targetVersion || "").trim();
-    const { release, config, releases } = await fetchRemoteReleaseInfoForVersion(requestedVersion);
-    const currentVersion = await readVersion();
-    const targetReleaseVersion = release.version || currentVersion;
+    const remote = await fetchRemoteReleaseInfoForVersion(requestedVersion);
+    const { release, releases } = remote;
+    config = remote.config;
+    currentVersion = await readVersion();
+    targetReleaseVersion = release.version || currentVersion;
     const latestVersion = releases?.[0]?.version || targetReleaseVersion;
 
     if (compareVersions(targetReleaseVersion, currentVersion) <= 0) {
@@ -1492,6 +1770,13 @@ async function applyUpdateInBackground(targetVersion = "") {
       throw new Error("Aucune archive de mise à jour n'est configurée.");
     }
 
+    const requireSha256 = config.server?.requireSha256 !== false;
+    if (!release.sha256 && requireSha256) {
+      throw new Error(
+        "La release distante ne fournit pas de somme SHA256. Installation refusée : publiez la version avec publish-release.sh pour générer le manifest."
+      );
+    }
+
     setState({
       status: "downloading",
       progress: 18,
@@ -1500,166 +1785,129 @@ async function applyUpdateInBackground(targetVersion = "") {
       latestVersion
     });
 
-    const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-update-"));
-    try {
-      const archivePath = path.join(tempRoot, "release.tar.gz");
-      await downloadFile(packageUrl, archivePath, config.server.headers || {});
-      pushLog(`Package téléchargé depuis ${packageUrl}.`);
+    tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-ia-update-"));
+    const archivePath = path.join(tempRoot, "release.tar.gz");
+    await downloadFile(packageUrl, archivePath, config.server.headers || {});
+    pushLog(`Package téléchargé depuis ${packageUrl}.`);
 
-      const requireSha256 = config.server?.requireSha256 !== false;
-      if (!release.sha256 && requireSha256) {
-        throw new Error(
-          "La release distante ne fournit pas de somme SHA256. Installation refusée : publiez la version avec publish-release.sh pour générer le manifest."
-        );
+    if (release.sha256) {
+      const digest = await sha256OfFile(archivePath);
+      if (digest !== String(release.sha256).toLowerCase()) {
+        throw new Error("La verification SHA256 du package a echoue.");
       }
-
-      if (release.sha256) {
-        const digest = await sha256OfFile(archivePath);
-        if (digest !== String(release.sha256).toLowerCase()) {
-          throw new Error("La verification SHA256 du package a echoue.");
-        }
-        pushLog("Verification SHA256 validee.");
-      }
-
-      pushLog("Contrôle de sécurité de l'archive...");
-      await assertSafeArchive(archivePath);
-      pushLog("Archive validée : aucun chemin dangereux détecté.");
-
-      setState({
-        status: "extracting",
-        progress: 35,
-        message: "Préparation des fichiers..."
-      });
-
-      const extractRoot = path.join(tempRoot, "extract");
-      await ensureDir(extractRoot);
-      await new Promise((resolve, reject) => {
-        const child = spawn("tar", ["-xzf", archivePath, "-C", extractRoot], {
-          stdio: ["ignore", "pipe", "pipe"]
-        });
-        child.stdout.on("data", (chunk) => pushLog(chunk.toString().trim()));
-        child.stderr.on("data", (chunk) => pushLog(chunk.toString().trim()));
-        child.on("error", reject);
-        child.on("close", (code) => {
-          if (code === 0) {
-            resolve();
-            return;
-          }
-          reject(new Error(`Extraction impossible (code ${code}).`));
-        });
-      });
-
-      const packageRoot = await detectPackageRoot(extractRoot);
-      await validatePackageRoot(packageRoot);
-      const backup = await createWorkspaceBackup(currentVersion, config.apply?.preservePaths || []);
-      rollbackBackupId = backup.id;
-      pushLog(`Sauvegarde de rollback créée (${backup.version}) dans ${backup.id}.`);
-
-      const configuredServices = sanitizeServiceNames(config.apply?.services);
-      const updaterCodeChanged =
-        configuredServices.includes("updater") && (await hasUpdaterCodeChanged(packageRoot));
-
-      setState({
-        status: "copying",
-        progress: 58,
-        message: "Application des nouveaux fichiers..."
-      });
-
-      await syncTree(packageRoot, workspaceDir, config.apply?.preservePaths || []);
-      filesSynced = true;
-      pushLog("Nouveaux fichiers du projet synchronisés.");
-
-      setState({
-        status: "restarting",
-        progress: 78,
-        message: "Redémarrage du backend avec le frontend embarqué..."
-      });
-
-      const immediateServices = configuredServices.filter((service) => service !== "updater");
-      const deferredServices = updaterCodeChanged
-        ? configuredServices.filter((service) => service === "updater")
-        : [];
-
-      if (!updaterCodeChanged && configuredServices.includes("updater")) {
-        pushLog("Code de l'updater inchangé : redémarrage du service de mise à jour évité.");
-      }
-
-      // Le redemarrage de l'updater (deferredServices, plus bas) NE DOIT PAS
-      // dependre du succes de celui du backend : si le CLI Docker du
-      // conteneur updater lui-meme est casse (ex: bug de decouverte du
-      // plugin "docker compose" corrige en v1.0.2), runComposeUpdate ici
-      // echoue systematiquement avec la MEME cause, empechant pour toujours
-      // l'updater de se reconstruire et donc de se corriger lui-meme. On
-      // capture l'erreur, on tente quand meme le self-heal de l'updater, puis
-      // on relance l'erreur d'origine.
-      let immediateServicesError = null;
-      if (immediateServices.length > 0) {
-        try {
-          await runComposeUpdate(immediateServices);
-        } catch (error) {
-          immediateServicesError = error;
-        }
-      }
-
-      if (deferredServices.length > 0) {
-        pushLog("Redémarrage de l'updater programmé en arrière-plan.");
-        triggerDetachedComposeUpdate(deferredServices);
-      }
-
-      if (immediateServicesError) {
-        throw immediateServicesError;
-      }
-
-      setState({
-        progress: 90,
-        message: "Redémarrage complet des services (Ollama, ChromaDB, Redis)..."
-      });
-      try {
-        await runComposeRestart(fullStackRestartServices);
-        pushLog("Ollama, ChromaDB et Redis redémarrés.");
-      } catch (error) {
-        // Non bloquant : le code applicatif est deja a jour, un souci de
-        // redemarrage sur ces services tiers ne doit pas faire echouer la mise a jour.
-        pushLog(`Redémarrage complet ignoré : ${error.message}`);
-      }
-
-      await pruneOldBackups();
-
-      setState({
-        busy: false,
-        status: "completed",
-        progress: 100,
-        message: "Mise à jour terminée.",
-        currentVersion: targetReleaseVersion,
-        latestVersion,
-        targetVersion: targetReleaseVersion,
-        updateAvailable: compareVersions(latestVersion, targetReleaseVersion) === 1,
-        completedAt: new Date().toISOString()
-      });
-      pushLog(`Mise à jour terminée avec succès vers ${targetReleaseVersion}.`);
-    } finally {
-      await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+      pushLog("Verification SHA256 validee.");
     }
+
+    pushLog("Contrôle de sécurité de l'archive...");
+    await assertSafeArchive(archivePath);
+    pushLog("Archive validée : aucun chemin dangereux détecté.");
+
+    setState({
+      status: "extracting",
+      progress: 35,
+      message: "Préparation des fichiers..."
+    });
+
+    const extractRoot = path.join(tempRoot, "extract");
+    await extractArchive(archivePath, extractRoot);
+    const packageRoot = await detectPackageRoot(extractRoot);
+    await validatePackageRoot(packageRoot);
+    const packageVersionJson = await fsp
+      .readFile(path.join(packageRoot, "version.json"), "utf8")
+      .catch(() => `${JSON.stringify({ version: targetReleaseVersion }, null, 2)}\n`);
+
+    const preservePaths = config.apply?.preservePaths || [];
+    backup = await createWorkspaceBackup(currentVersion, preservePaths);
+    pushLog(`Sauvegarde de rollback créée (${backup.version}) dans ${backup.id}.`);
+
+    setState({
+      status: "copying",
+      progress: 58,
+      message: "Application des nouveaux fichiers..."
+    });
+
+    // version.json n'est PAS synchronise ici : il n'est ecrit qu'une fois la
+    // nouvelle version demarree. Tant qu'il porte l'ancien numero, la mise a
+    // jour reste detectee comme disponible et peut etre relancee.
+    workspaceTouched = true;
+    await syncTree(packageRoot, workspaceDir, [...preservePaths, "version.json"]);
+    pushLog("Nouveaux fichiers du projet synchronisés.");
+    await restoreWorkspaceOwnership("après synchronisation (aucun sudo nécessaire ensuite)");
+
+    setState({
+      status: "restarting",
+      progress: 72,
+      message: "Reconstruction et redémarrage des services..."
+    });
+
+    const { includesUpdater } = await restartApplicationStack(config);
+    pushLog("Nouvelle version démarrée : le backend répond correctement.");
+
+    // Ecriture sur place (meme inode) : version.json est monte fichier par
+    // fichier dans le backend, un remplacement par renommage n'y serait pas vu.
+    await fsp.writeFile(versionFilePath, packageVersionJson, "utf8");
+    rebuildUpdater = includesUpdater;
+    await pruneOldBackups();
+
+    setState({
+      busy: false,
+      status: "completed",
+      progress: 100,
+      message: "Mise à jour terminée.",
+      currentVersion: targetReleaseVersion,
+      latestVersion,
+      targetVersion: targetReleaseVersion,
+      updateAvailable: compareVersions(latestVersion, targetReleaseVersion) === 1,
+      completedAt: new Date().toISOString()
+    });
+    pushLog(`Mise à jour terminée avec succès vers ${targetReleaseVersion}.`);
   } catch (error) {
     let message = error.message;
-    if (filesSynced) {
-      // Les fichiers sont deja en place : seul le redemarrage/reconstruction a
-      // echoue. Ne pas laisser croire que rien n'a change.
-      message =
-        `${error.message} — Les nouveaux fichiers sont deja installes mais les conteneurs n'ont pas ete reconstruits. ` +
-        `Relancez la mise a jour pour reconstruire, ou restaurez la sauvegarde ${rollbackBackupId || "la plus recente"}.`;
+    let restored = false;
+
+    if (workspaceTouched && backup) {
+      pushLog(`Erreur : ${error.message}`);
+      pushLog(`Retour automatique à la version ${currentVersion}...`);
+      setState({
+        status: "rollback",
+        progress: 90,
+        message: `Échec de la mise à jour : retour automatique à la version ${currentVersion}...`
+      });
+      try {
+        await restoreBackupAndRestart(backup, config);
+        restored = true;
+        message =
+          `La mise à jour vers ${targetReleaseVersion} a échoué (${error.message}). ` +
+          `Retour automatique à la version ${currentVersion} effectué : l'application fonctionne normalement.`;
+      } catch (restoreError) {
+        message =
+          `La mise à jour vers ${targetReleaseVersion} a échoué (${error.message}) et le retour automatique aussi ` +
+          `(${restoreError.message}). Restaurez la sauvegarde ${backup.id} depuis l'onglet Mises à jour, ` +
+          "ou lancez ./doctor.sh sur le serveur.";
+      }
     }
+
     setState({
       busy: false,
       status: "error",
       progress: 100,
       message,
       error: message,
-      filesSynced,
-      recoverableBackupId: filesSynced ? rollbackBackupId : "",
+      filesSynced: workspaceTouched && !restored,
+      recoverableBackupId: workspaceTouched && !restored && backup ? backup.id : "",
       completedAt: new Date().toISOString()
     });
     pushLog(`Erreur de mise à jour : ${message}`);
+  } finally {
+    if (tempRoot) {
+      await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  // En dernier, une fois l'etat final enregistre : ce conteneur va etre remplace.
+  if (rebuildUpdater) {
+    await scheduleUpdaterSelfRebuild();
+    persistState();
   }
 }
 
@@ -1670,12 +1918,15 @@ async function rollbackToBackupInBackground(backupId) {
     progress: 5,
     message: "Préparation du retour arrière...",
     error: null,
+    filesSynced: false,
+    recoverableBackupId: "",
     startedAt: new Date().toISOString(),
     completedAt: null,
     logs: []
   });
   pushLog(`Début du rollback vers ${backupId}.`);
 
+  let rebuildUpdater = false;
   try {
     const config = await readUpdateConfig();
     const backups = await listBackups();
@@ -1691,56 +1942,8 @@ async function rollbackToBackupInBackground(backupId) {
       targetVersion: backup.version
     });
 
-    const { updaterCodeChanged } = await restoreBackupArchive(
-      backup.archivePath,
-      config.apply?.preservePaths || []
-    );
-
-    setState({
-      progress: 72,
-      message: "Redémarrage des services..."
-    });
-
-    const configuredServices = sanitizeServiceNames(config.apply?.services);
-    const immediateServices = configuredServices.filter((service) => service !== "updater");
-    const deferredServices = updaterCodeChanged
-      ? configuredServices.filter((service) => service === "updater")
-      : [];
-
-    if (!updaterCodeChanged && configuredServices.includes("updater")) {
-      pushLog("Code de l'updater inchangé : redémarrage du service de mise à jour évité.");
-    }
-
-    // Meme raisonnement que dans applyUpdateInBackground : ne jamais laisser
-    // un echec de redemarrage du backend empecher le self-heal de l'updater.
-    let immediateServicesError = null;
-    if (immediateServices.length > 0) {
-      try {
-        await runComposeUpdate(immediateServices);
-      } catch (error) {
-        immediateServicesError = error;
-      }
-    }
-
-    if (deferredServices.length > 0) {
-      pushLog("Redémarrage de l'updater programmé en arrière-plan.");
-      triggerDetachedComposeUpdate(deferredServices);
-    }
-
-    if (immediateServicesError) {
-      throw immediateServicesError;
-    }
-
-    setState({
-      progress: 90,
-      message: "Redémarrage complet des services (Ollama, ChromaDB, Redis)..."
-    });
-    try {
-      await runComposeRestart(fullStackRestartServices);
-      pushLog("Ollama, ChromaDB et Redis redémarrés.");
-    } catch (error) {
-      pushLog(`Redémarrage complet ignoré : ${error.message}`);
-    }
+    const { includesUpdater } = await restoreBackupAndRestart(backup, config);
+    rebuildUpdater = includesUpdater;
 
     setState({
       busy: false,
@@ -1763,6 +1966,11 @@ async function rollbackToBackupInBackground(backupId) {
       completedAt: new Date().toISOString()
     });
     pushLog(`Erreur de rollback : ${error.message}`);
+  }
+
+  if (rebuildUpdater) {
+    await scheduleUpdaterSelfRebuild();
+    persistState();
   }
 }
 
@@ -1817,6 +2025,7 @@ const exportExcludes = [
   "release",
   ".update-backups",
   ".update-release-cache.json",
+  ".update-state.json",
   ".claude",
   "backend/node_modules",
   "frontend/node_modules",
@@ -2231,6 +2440,9 @@ app.post("/export/publish", requireSharedToken, async (req, res) => {
 });
 
 app.listen(port, async () => {
+  await restorePersistedState();
   setState({ currentVersion: await readVersion() });
   console.log(`Updater ready on port ${port}`);
+  // Repare au demarrage les fichiers laisses a root par une version precedente.
+  restoreWorkspaceOwnership().catch(() => undefined);
 });

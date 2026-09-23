@@ -155,6 +155,8 @@ cat > "$TEMP_EXCLUDES_FILE" <<'EOF'
 export
 release
 .update-backups
+.update-release-cache.json
+.update-state.json
 backend/node_modules
 frontend/node_modules
 updater/node_modules

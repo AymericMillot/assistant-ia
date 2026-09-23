@@ -188,6 +188,12 @@ async function deleteCollectionIfExists(folderName) {
   return false;
 }
 
+// Extraction de texte partagee avec les pieces jointes du chat (memes parseurs
+// que les documents : PDF, DOCX, ODT, XLSX, HTML, texte brut).
+export async function extractDocumentText(absolutePath) {
+  return readFileContent(absolutePath);
+}
+
 async function readFileContent(absolutePath) {
   const extension = path.extname(absolutePath).toLowerCase();
 
@@ -2286,7 +2292,20 @@ export async function deleteWebLinkFromIndex(linkId) {
   }
 }
 
-export async function indexAttachmentText(attachment, text) {
+// Filtre Chroma des pieces jointes : une piece jointe non triee ("session")
+// ne sert qu'a la conversation qui l'a deposee ; une piece jointe conservee par
+// un referent ("shared") sert a tout le monde.
+function buildAttachmentScopeFilter(sessionId) {
+  if (sessionId) {
+    return {
+      $or: [{ scope: { $eq: "shared" } }, { session_id: { $eq: String(sessionId) } }]
+    };
+  }
+
+  return { scope: { $eq: "shared" } };
+}
+
+export async function indexAttachmentText(attachment, text, { scope = "session" } = {}) {
   const chunks = await buildIndexableChunks(text);
   if (chunks.length === 0) {
     throw new Error("La piece jointe ne contient aucun texte exploitable.");
@@ -2303,6 +2322,8 @@ export async function indexAttachmentText(attachment, text) {
           file_name: attachment.filename || "",
           folder: "pieces-jointes",
           visibility: "private",
+          scope: scope === "shared" ? "shared" : "session",
+          session_id: String(attachment.session_id || ""),
           chunk_index: index
         }
       })
@@ -2559,7 +2580,7 @@ export async function searchIndexedChunks(query, { folderName = "all", limit = 3
   };
 }
 
-export async function retrieveContext(question, folderName = "all", history = []) {
+export async function retrieveContext(question, folderName = "all", history = [], { sessionId = null } = {}) {
   const retrievalQuery = buildRetrievalQuery(question, history);
   const retrievalFocusQuestion = buildRetrievalFocusQuestion(question, history) || question;
   const folders = folderName === "all" ? await listFolders() : [folderName];
@@ -2636,7 +2657,8 @@ export async function retrieveContext(question, folderName = "all", history = []
       const queryResult = await collection.query({
         queryEmbeddings,
         nResults: ragTopK,
-        include: ["documents", "metadatas", "distances"]
+        include: ["documents", "metadatas", "distances"],
+        ...(folder === attachmentsFolderKey ? { where: buildAttachmentScopeFilter(sessionId) } : {})
       });
 
       // Avec plusieurs requetes (query expansion), rows() renvoie un groupe de
@@ -2930,7 +2952,12 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
   return messages;
 }
 
-export async function buildRagPayload(question, folderName = "all", history = []) {
+export async function buildRagPayload(
+  question,
+  folderName = "all",
+  history = [],
+  { sessionId = null, hasAttachments = false } = {}
+) {
   if ((isDocumentInventoryRequest(question) || isDocumentAccessRequest(question)) && getDocuments().length === 0) {
     await syncFilesystemToDatabase();
   }
@@ -2940,9 +2967,24 @@ export async function buildRagPayload(question, folderName = "all", history = []
   const documentInventoryRequest = isDocumentInventoryRequest(question);
   const explicitDocumentRequest = findExplicitDocumentRequest(question);
   const requestedDocumentGroup = findRequestedDocumentGroup(question);
-  const retrieval = await retrieveContext(question, folderName, history);
+  const retrieval = await retrieveContext(question, folderName, history, { sessionId });
   retrieval.projectFocusScore = computeProjectFocusScore(question, retrieval, history);
   const grounding = buildGroundingSummary(retrieval);
+
+  // Question accompagnee d'un fichier : les reponses toutes faites (document
+  // prive, inventaire, "voici le document"...) sont court-circuitees, la
+  // question porte sur le fichier joint et doit etre traitee par le modele.
+  if (hasAttachments) {
+    const attachmentMessages = buildChatMessages(question, history, retrieval);
+    return {
+      messages: attachmentMessages,
+      promptPreview: buildMessagesPreview(attachmentMessages),
+      sources: retrieval.sources,
+      grounding,
+      responseOverride: null,
+      retrieval
+    };
+  }
 
   if (explicitIdentityQuestion && retrieval.manualResources.length === 0) {
     return {

@@ -149,6 +149,64 @@ assert_eq "$v_root" "$v_back"  "backend/package.json aligné sur version.json ($
 assert_eq "$v_root" "$v_front" "frontend/package.json aligné sur version.json ($v_root)"
 
 # --------------------------------------------------------------------------
+# 6. Droits des fichiers (aucun sudo cote serveur) et pieces jointes
+# --------------------------------------------------------------------------
+echo "== Droits des fichiers et pièces jointes =="
+entrypoint="$ROOT_DIR/backend/docker-entrypoint.sh"
+[[ -x "$entrypoint" ]] && ok "docker-entrypoint.sh présent et exécutable" || bad "docker-entrypoint.sh absent ou non exécutable"
+sh -n "$entrypoint" && ok "docker-entrypoint.sh : syntaxe sh valide" || bad "docker-entrypoint.sh : erreur de syntaxe"
+assert_contains "$(cat "$entrypoint")" "setpriv" "l'entrypoint abandonne les droits root (setpriv)"
+assert_contains "$(cat "$ROOT_DIR/backend/Dockerfile")" 'ENTRYPOINT ["/app/docker-entrypoint.sh"]' "Dockerfile backend utilise l'entrypoint"
+assert_contains "$(cat "$ROOT_DIR/.env.example")" "APP_UID=" ".env.example déclare APP_UID"
+assert_contains "$(cat "$ROOT_DIR/install.sh")" 'update_env "APP_UID"' "install.sh renseigne APP_UID"
+assert_contains "$(cat "$ROOT_DIR/updater/server.js")" "restoreWorkspaceOwnership" "l'updater rend le projet à son propriétaire"
+
+owner_tmp="$(mktemp -d)"
+touch "$owner_tmp/a" "$owner_tmp/b"
+owner_ids="$(ROOT_DIR="$owner_tmp" project_owner_ids)"
+assert_eq "$(id -u):$(id -g)" "$owner_ids" "project_owner_ids lit le propriétaire du dossier"
+assert_eq "0" "$(ROOT_DIR="$owner_tmp" count_foreign_owned_files)" "count_foreign_owned_files : 0 fichier étranger"
+rm -rf "$owner_tmp"
+
+assert_contains "$(cat "$ROOT_DIR/backend/config/featureFlags.js")" "ATTACHMENTS_TEMPORARILY_DISABLED = false" "pièces jointes réactivées (verrou levé)"
+
+# --------------------------------------------------------------------------
+# 7. Affichage des builds Docker : "failed to get console"
+# --------------------------------------------------------------------------
+# Docker Compose recent ignore BUILDKIT_PROGRESS : sans COMPOSE_PROGRESS=plain,
+# un build dont stdout est redirige depuis un vrai terminal echoue avec
+# "failed to get console: provided file is not a console".
+echo "== Affichage des builds Docker (failed to get console) =="
+for f in install.sh .project-tools.sh; do
+  for inherited in "" tty auto plain quiet; do
+    got="$(env -u COMPOSE_PROGRESS -u BUILDKIT_PROGRESS ${inherited:+COMPOSE_PROGRESS=$inherited} \
+      bash -c "$(grep -E '^case "\$\{(COMPOSE|BUILDKIT)_PROGRESS' "$ROOT_DIR/$f"); echo \"\$COMPOSE_PROGRESS/\$BUILDKIT_PROGRESS\"")"
+    case "$inherited" in quiet) want="quiet/plain" ;; *) want="plain/plain" ;; esac
+    assert_eq "$want" "$got" "$f : COMPOSE_PROGRESS hérité='${inherited:-vide}' -> $want"
+  done
+done
+assert_contains "$(cat "$ROOT_DIR/updater/server.js")" 'COMPOSE_PROGRESS: process.env.COMPOSE_PROGRESS || "plain"' "l'updater force COMPOSE_PROGRESS"
+assert_contains "$(cat "$ROOT_DIR/updater/server.js")" '"COMPOSE_PROGRESS=plain"' "le conteneur auxiliaire de l'updater force COMPOSE_PROGRESS"
+
+# Test reel (optionnel, si Docker Compose et "script" sont disponibles) : build
+# sous un pseudo-terminal avec stdout redirige, exactement comme install.sh.
+if [[ "${RUN_DOCKER_TESTS:-0}" == "1" ]] && command -v script >/dev/null 2>&1 \
+  && PATH="${PATH#"$FAKE_BIN":}" docker compose version >/dev/null 2>&1; then
+  ctx="$(mktemp -d)"
+  printf 'FROM busybox\nRUN true\n' > "$ctx/Dockerfile"
+  printf 'services:\n  t:\n    build: .\n    image: assistant-ia-console-test\n' > "$ctx/docker-compose.yml"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    tty_run() { script -q /dev/null bash -c "$1"; }
+  else
+    tty_run() { script -qec "$1" /dev/null; }
+  fi
+  out="$(PATH="${PATH#"$FAKE_BIN":}" tty_run "source '$ROOT_DIR/.project-tools.sh'; docker compose -f '$ctx/docker-compose.yml' build t >/dev/null; echo rc=\$?" 2>&1)"
+  assert_contains "$out" "rc=0" "build réel sous terminal avec stdout redirigé"
+  PATH="${PATH#"$FAKE_BIN":}" docker image rm assistant-ia-console-test >/dev/null 2>&1 || true
+  rm -rf "$ctx"
+fi
+
+# --------------------------------------------------------------------------
 rm -rf "$FAKE_BIN" "$TMP_ENV_DIR"
 echo
 echo "Résultat : ${PASS} ok, ${FAIL} échec(s)."

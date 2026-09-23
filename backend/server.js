@@ -15,6 +15,7 @@ import chatRoutes from "./routes/chat.js";
 import adminRoutes from "./routes/admin.js";
 import feedbackRoutes from "./routes/feedback.js";
 import { syncFilesystemToDatabase } from "./services/fileService.js";
+import { getAttachmentLimits, reconcileAttachmentIndexes } from "./services/attachmentService.js";
 import { initializeQueueService, shutdownQueue } from "./services/queueService.js";
 import {
   initializeSchedulerService,
@@ -266,6 +267,14 @@ await syncFilesystemToDatabase().catch((error) => {
 });
 initializeQueueService();
 initializeSchedulerService();
+// Pieces jointes restees en attente ou interrompues par un redemarrage.
+setTimeout(() => {
+  try {
+    reconcileAttachmentIndexes();
+  } catch (error) {
+    logger.warn("Reprise de l'indexation des pieces jointes impossible.", { message: error.message });
+  }
+}, 10000).unref();
 scheduleModelCatalogRefresh();
 
 setSocketServer(io);
@@ -362,6 +371,11 @@ app.get("/api/branding", (_req, res) => {
     attachmentsDisabledReason: ATTACHMENTS_TEMPORARILY_DISABLED
       ? ATTACHMENTS_DISABLED_REASON
       : null,
+    attachmentLimits: {
+      maxBytes: getAttachmentLimits().maxBytes,
+      extensions: getAttachmentLimits().extensions,
+      perQuestion: getAttachmentLimits().perQuestion
+    },
     reasoningModelAvailable: Boolean(getActiveModelByRole("reasoning"))
   });
 });

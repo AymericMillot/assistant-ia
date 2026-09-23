@@ -32,7 +32,10 @@ const allowedUserAttachmentUpdateColumns = new Set([
   "chunk_count",
   "last_error",
   "reviewed_at",
-  "expires_at"
+  "expires_at",
+  "index_scope",
+  "index_attempts",
+  "extracted_chars"
 ]);
 
 const resolveRuntimePath = (targetPath) =>
@@ -365,6 +368,23 @@ export function initializeDatabase() {
       dbInstance.exec(`ALTER TABLE manual_resources ADD COLUMN ${columnName} ${definition}`);
     }
   });
+
+  // Pieces jointes (v1.1.5) : portee d'indexation ("session" tant que la piece
+  // jointe n'est pas triee, "shared" une fois conservee par un referent), nombre
+  // de tentatives d'indexation et taille du texte extrait.
+  const userAttachmentColumns = dbInstance.prepare("PRAGMA table_info(user_attachments)").all();
+  [
+    ["index_scope", "TEXT"],
+    ["index_attempts", "INTEGER NOT NULL DEFAULT 0"],
+    ["extracted_chars", "INTEGER NOT NULL DEFAULT 0"]
+  ].forEach(([columnName, definition]) => {
+    if (!userAttachmentColumns.some((column) => column.name === columnName)) {
+      dbInstance.exec(`ALTER TABLE user_attachments ADD COLUMN ${columnName} ${definition}`);
+    }
+  });
+  dbInstance.exec(
+    "CREATE INDEX IF NOT EXISTS idx_user_attachments_session ON user_attachments(session_id, created_at DESC)"
+  );
 
   migrateMessagesToConversationExchanges();
   backfillFeedbackExchangeIds();
@@ -1135,6 +1155,38 @@ export function updateUserAttachmentRow(id, updates) {
 
 export function deleteUserAttachmentById(id) {
   return getDb().prepare("DELETE FROM user_attachments WHERE id = ?").run(id);
+}
+
+export function listUserAttachmentsBySession(sessionId, limit = 3) {
+  if (!sessionId) {
+    return [];
+  }
+
+  return getDb()
+    .prepare(
+      `
+      SELECT *
+      FROM user_attachments
+      WHERE session_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `
+    )
+    .all(sessionId, limit);
+}
+
+export function findUserAttachmentBySessionAndHash(sessionId, md5Hash) {
+  if (!sessionId) {
+    return null;
+  }
+
+  return getDb()
+    .prepare("SELECT * FROM user_attachments WHERE session_id = ? AND md5_hash = ? ORDER BY id DESC LIMIT 1")
+    .get(sessionId, md5Hash);
+}
+
+export function getUserAttachmentsTotalSize() {
+  return Number(getDb().prepare("SELECT COALESCE(SUM(size), 0) AS total FROM user_attachments").get().total || 0);
 }
 
 export function getExpiredUserAttachments(nowIsoString) {

@@ -4,10 +4,11 @@
 // referent tente de la reactiver. Pour lever un verrou : repasser la constante
 // a false et publier une nouvelle version.
 
-// v1.1.2 : l'ajout de pieces jointes cote chat est suspendu (incident technique
-// sur la chaine d'indexation + renforcement des controles de securite sur les
-// fichiers deposes par les utilisateurs).
-export const ATTACHMENTS_TEMPORARILY_DISABLED = true;
+// v1.1.2 : l'ajout de pieces jointes cote chat avait ete suspendu (incident
+// technique sur la chaine d'indexation + renforcement des controles de securite).
+// v1.1.5 : verrou leve (indexation fiabilisee avec reprise au demarrage,
+// verification du contenu reel des fichiers, quota, portee par conversation).
+export const ATTACHMENTS_TEMPORARILY_DISABLED = false;
 
 // Message unique affiche aux utilisateurs (chat) comme aux referents
 // (administration) quand le verrou ci-dessus est actif.

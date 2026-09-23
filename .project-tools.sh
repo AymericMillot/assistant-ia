@@ -6,13 +6,16 @@ ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 COOKIE_FILE="$ROOT_DIR/assistant-ia-admin-cookie.txt"
 
-# Les scripts qui sourcent ce fichier redirigent/capturent souvent la sortie
-# des builds Docker (">/dev/null", "$(...)", "tee"...). Sur certaines
-# versions de Docker Desktop (notamment macOS), BuildKit tente malgre tout
-# d'utiliser son mode de progression interactif (TTY) et echoue avec "failed
-# to get console: provided file is not a console" des que la sortie standard
-# n'est pas un vrai terminal. Forcer le mode "plain" evite ce faux echec.
-export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
+# Les scripts redirigent/capturent systematiquement la sortie des builds
+# Docker (">/dev/null", "$(...)", "tee"...). Quand stderr est un terminal mais
+# pas stdout, Docker Compose choisit son affichage interactif (TTY) et echoue
+# avec "failed to get console: provided file is not a console". Compose
+# v2.2x+/v5 IGNORE BUILDKIT_PROGRESS et ne lit que COMPOSE_PROGRESS : les deux
+# sont forces a "plain" (les valeurs non interactives deja choisies par
+# l'operateur sont respectees ; une valeur "tty"/"auto" heritee du shell est
+# remplacee, car c'est precisement elle qui provoque l'echec).
+case "${COMPOSE_PROGRESS:-}" in plain|quiet|json) ;; *) export COMPOSE_PROGRESS=plain ;; esac
+case "${BUILDKIT_PROGRESS:-}" in plain|quiet|rawjson) ;; *) export BUILDKIT_PROGRESS=plain ;; esac
 
 os_release_field() {
   local field="$1"
@@ -521,4 +524,47 @@ ensure_updater_running() {
 
 fetch_updater_status() {
   docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/status 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Proprietaire des fichiers du projet (aucun sudo necessaire cote serveur).
+# Les anciennes versions faisaient tourner le backend et l'updater en root :
+# les fichiers qu'ils creaient (pieces jointes, base SQLite, logs, sauvegardes,
+# code synchronise) appartenaient a root et ./update.sh, git pull ou rm
+# echouaient sans sudo. On detecte ces fichiers et on les rend au proprietaire
+# du projet via un conteneur jetable : il suffit d'avoir acces a Docker.
+# ---------------------------------------------------------------------------
+project_owner_ids() {
+  local uid gid
+  uid="$(stat -c %u "$ROOT_DIR" 2>/dev/null || stat -f %u "$ROOT_DIR" 2>/dev/null)"
+  gid="$(stat -c %g "$ROOT_DIR" 2>/dev/null || stat -f %g "$ROOT_DIR" 2>/dev/null)"
+  printf '%s:%s' "$uid" "$gid"
+}
+
+# Affiche le nombre de fichiers du projet qui n'appartiennent pas a son
+# proprietaire (node_modules et .git exclus pour rester rapide).
+count_foreign_owned_files() {
+  local owner uid
+  owner="$(project_owner_ids)"
+  uid="${owner%%:*}"
+  find "$ROOT_DIR" \( -name node_modules -o -name .git \) -prune -o ! -user "$uid" -print 2>/dev/null \
+    | wc -l | tr -d ' '
+}
+
+repair_workspace_ownership() {
+  local owner image
+  owner="$(project_owner_ids)"
+  [[ -n "$owner" && "$owner" != ":" && "${owner%%:*}" != "0" ]] || return 0
+
+  if [[ "$(id -u)" == "0" ]]; then
+    chown -R "$owner" "$ROOT_DIR" 2>/dev/null || true
+    return 0
+  fi
+
+  # Image deja presente localement (aucun telechargement) : celle du backend,
+  # sinon une petite image standard.
+  image="assistant-ia-backend:latest"
+  docker image inspect "$image" >/dev/null 2>&1 || image="busybox:latest"
+  docker run --rm --user 0 --entrypoint chown -v "$ROOT_DIR:/workspace" "$image" \
+    -R "$owner" /workspace >/dev/null 2>&1
 }

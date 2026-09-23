@@ -30,6 +30,31 @@ function attachmentStatusLabel(attachment) {
   return "À trier";
 }
 
+function indexingBadge(attachment) {
+  if (attachment.indexingStatus === "indexed") {
+    return {
+      tone: "success",
+      label:
+        attachment.indexScope === "shared"
+          ? "Indexée · utilisée pour tous"
+          : "Indexée · conversation d'origine uniquement"
+    };
+  }
+
+  if (attachment.indexingStatus === "processing") {
+    return { tone: "neutral", label: "Indexation en cours…" };
+  }
+
+  if (attachment.indexingStatus === "error") {
+    return { tone: "danger", label: "Indexation échouée" };
+  }
+
+  return {
+    tone: "neutral",
+    label: attachment.indexAttempts > 0 ? `Nouvel essai prévu (${attachment.indexAttempts}/3)` : "Indexation en attente"
+  };
+}
+
 export default function AttachmentManager() {
   const [attachments, setAttachments] = useState([]);
   const [retentionDays, setRetentionDays] = useState(30);
@@ -43,6 +68,7 @@ export default function AttachmentManager() {
   const [confirmState, setConfirmState] = useState(null);
   const [previewState, setPreviewState] = useState(null);
   const [previewLoadingId, setPreviewLoadingId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   async function loadAttachments({ silent = false } = {}) {
     if (!silent) {
@@ -51,7 +77,11 @@ export default function AttachmentManager() {
 
     try {
       const payload = await fetchJson("/api/admin/attachments");
-      setAttachments(payload.attachments || []);
+      const nextAttachments = payload.attachments || [];
+      setAttachments(nextAttachments);
+      setSelectedIds((current) =>
+        current.filter((id) => nextAttachments.some((attachment) => attachment.id === id))
+      );
       setRetentionDays(payload.retentionDays || 30);
       setAttachmentsEnabled(payload.attachmentsEnabled !== false);
       setAttachmentsLocked(payload.attachmentsLocked === true);
@@ -68,6 +98,90 @@ export default function AttachmentManager() {
   useEffect(() => {
     loadAttachments();
   }, []);
+
+  // Rafraichissement automatique tant qu'une indexation est en cours.
+  const hasIndexingInProgress = attachments.some((attachment) =>
+    ["pending", "processing"].includes(attachment.indexingStatus)
+  );
+  useEffect(() => {
+    if (!hasIndexingInProgress) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => loadAttachments({ silent: true }), 5000);
+    return () => clearInterval(timer);
+  }, [hasIndexingInProgress]);
+
+  function toggleSelected(attachmentId) {
+    setSelectedIds((current) =>
+      current.includes(attachmentId)
+        ? current.filter((id) => id !== attachmentId)
+        : [...current, attachmentId]
+    );
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((current) =>
+      current.length === attachments.length ? [] : attachments.map((attachment) => attachment.id)
+    );
+  }
+
+  async function runBulkAction(action) {
+    setLoading(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const payload = await fetchJson("/api/admin/attachments/bulk", {
+        method: "POST",
+        body: JSON.stringify({ action, ids: selectedIds })
+      });
+      setMessage(
+        payload.failures?.length
+          ? `${payload.message} ${payload.failures.length} échec(s).`
+          : payload.message
+      );
+      setSelectedIds([]);
+      setPreviewState(null);
+      await loadAttachments({ silent: true });
+    } catch (requestError) {
+      setError(reportError(`attachments:bulk-${action}`, requestError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function requestBulkDelete() {
+    setConfirmState({
+      variant: "danger",
+      title: `Détruire ${selectedIds.length} pièce(s) jointe(s) ?`,
+      message:
+        "Les fichiers sélectionnés seront supprimés définitivement du serveur et de l'index de l'assistant.",
+      confirmLabel: "Détruire",
+      onConfirm: async () => {
+        setConfirmState(null);
+        await runBulkAction("delete");
+      }
+    });
+  }
+
+  async function reindexAttachment(attachment) {
+    setLoading(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const payload = await fetchJson(`/api/admin/attachments/${attachment.id}/reindex`, {
+        method: "POST"
+      });
+      setMessage(payload.message);
+      await loadAttachments({ silent: true });
+    } catch (requestError) {
+      setError(reportError("attachments:reindex", requestError));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function toggleAttachmentsEnabled() {
     setToggleBusy(true);
@@ -109,9 +223,9 @@ export default function AttachmentManager() {
   function requestDeleteAttachment(attachment) {
     setConfirmState({
       variant: "danger",
-      title: "Supprimer cette pièce jointe ?",
+      title: "Détruire cette pièce jointe ?",
       message: `« ${attachment.originalName} » sera supprimée définitivement, y compris de l'index de l'assistant.`,
-      confirmLabel: "Supprimer",
+      confirmLabel: "Détruire",
       onConfirm: async () => {
         setConfirmState(null);
         setLoading(true);
@@ -169,10 +283,11 @@ export default function AttachmentManager() {
               Pièces jointes des utilisateurs
             </h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400">
-              Les fichiers texte déposés dans le chat sont indexés pour aider l'assistant à
-              répondre. Marquez chaque pièce jointe comme pertinente pour la conserver, ou
-              supprimez-la. Sans action de votre part, une pièce jointe non triée est supprimée
-              automatiquement après {retentionDays} jours.
+              Les fichiers déposés dans le chat (texte, PDF, Word, Excel) sont lus par
+              l'assistant. Tant qu'une pièce jointe n'est pas triée, elle ne sert qu'à la
+              conversation qui l'a déposée. Conservez-la pour qu'elle serve aux réponses de tous
+              les utilisateurs, ou détruisez-la. Sans action de votre part, une pièce jointe non
+              triée est supprimée automatiquement après {retentionDays} jours.
             </p>
           </div>
           <button
@@ -249,16 +364,56 @@ export default function AttachmentManager() {
         {attachments.length === 0 ? (
           <EmptyState
             title="Aucune pièce jointe déposée."
-            description="Les fichiers texte envoyés par les utilisateurs depuis le chat apparaîtront ici."
+            description="Les fichiers envoyés par les utilisateurs depuis le chat apparaîtront ici."
           />
         ) : (
           <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-slate-50 p-3 dark:bg-slate-800/50">
+              <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.length > 0 && selectedIds.length === attachments.length}
+                  onChange={toggleSelectAll}
+                />
+                Tout sélectionner
+              </label>
+              <span className="flex-1 text-sm text-slate-500 dark:text-slate-400">
+                {selectedIds.length > 0
+                  ? `${selectedIds.length} sélectionnée(s)`
+                  : "Sélectionnez des pièces jointes pour les traiter en une fois."}
+              </span>
+              <button
+                className="soft-button"
+                type="button"
+                disabled={loading || selectedIds.length === 0}
+                onClick={() => runBulkAction("keep")}
+              >
+                Conserver la sélection
+              </button>
+              <button
+                className="ghost-button border-rose-200 text-rose-700 hover:border-rose-300 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-400 dark:hover:bg-rose-950/40"
+                type="button"
+                disabled={loading || selectedIds.length === 0}
+                onClick={requestBulkDelete}
+              >
+                Détruire la sélection
+              </button>
+            </div>
+
             {attachments.map((attachment) => (
               <article
                 key={attachment.id}
                 className="rounded-[22px] border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-700 dark:bg-slate-800/50"
               >
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex min-w-0 gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-1.5 shrink-0"
+                      aria-label={`Sélectionner ${attachment.originalName}`}
+                      checked={selectedIds.includes(attachment.id)}
+                      onChange={() => toggleSelected(attachment.id)}
+                    />
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="break-all text-base font-semibold text-slate-900 dark:text-slate-100">
@@ -266,6 +421,9 @@ export default function AttachmentManager() {
                       </h3>
                       <StatusBadge tone={attachmentStatusTone(attachment)}>
                         {attachmentStatusLabel(attachment)}
+                      </StatusBadge>
+                      <StatusBadge tone={indexingBadge(attachment).tone}>
+                        {indexingBadge(attachment).label}
                       </StatusBadge>
                       {attachment.status === "pending" && attachment.daysRemaining !== null && (
                         <StatusBadge tone={attachment.daysRemaining <= 5 ? "danger" : "neutral"}>
@@ -278,6 +436,10 @@ export default function AttachmentManager() {
 
                     <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
                       {formatBytes(attachment.size)} · déposée le {formatDateTime(attachment.createdAt)}
+                      {attachment.sessionLabel ? ` · conversation ${attachment.sessionLabel}` : ""}
+                      {attachment.extractedChars > 0
+                        ? ` · ${attachment.extractedChars.toLocaleString("fr-FR")} caractères lus`
+                        : ""}
                       {attachment.chunkCount > 0
                         ? ` · ${attachment.chunkCount} extrait(s) indexé(s)`
                         : ""}
@@ -295,6 +457,7 @@ export default function AttachmentManager() {
                       </p>
                     )}
                   </div>
+                  </div>
 
                   <div className="flex flex-wrap gap-2 lg:shrink-0">
                     <button
@@ -310,6 +473,23 @@ export default function AttachmentManager() {
                           ? "Masquer le contenu"
                           : "Voir le contenu"}
                     </button>
+                    <a
+                      className="ghost-button"
+                      href={`/api/admin/attachments/${attachment.id}/download`}
+                      download
+                    >
+                      Télécharger
+                    </a>
+                    {attachment.indexingStatus === "error" && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        disabled={loading}
+                        onClick={() => reindexAttachment(attachment)}
+                      >
+                        Réindexer
+                      </button>
+                    )}
                     {attachment.status !== "kept" && (
                       <button
                         className="soft-button"
@@ -326,7 +506,7 @@ export default function AttachmentManager() {
                       disabled={loading}
                       onClick={() => requestDeleteAttachment(attachment)}
                     >
-                      Non pertinente, supprimer
+                      Non pertinente, détruire
                     </button>
                   </div>
                 </div>

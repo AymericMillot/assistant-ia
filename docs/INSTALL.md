@@ -13,6 +13,27 @@
 - Machine recommandée : 16 Go de RAM ou plus, processeur récent, espace disque suffisant pour les
   modèles Ollama et les documents indexés (compter plusieurs Go par modèle).
 
+### macOS : Docker installé automatiquement
+
+Si Docker est absent et que [Homebrew](https://brew.sh) est présent, `./install.sh` installe
+**Colima** (VM Docker légère, sans mot de passe administrateur ni fenêtre de licence) avec
+`docker`, `docker-compose` et `docker-buildx`, déclare les plugins dans `~/.docker/config.json`
+puis démarre la VM avec la moitié de la RAM du Mac (4 à 16 Go). Docker Desktop reste pris en
+charge : s'il est installé, il est simplement lancé. Équivalent manuel :
+
+```bash
+brew install colima docker docker-compose docker-buildx
+colima start --cpu 4 --memory 8 --disk 100
+```
+
+**Ne placez pas le projet dans un dossier synchronisé par iCloud** (`~/Documents` ou `~/Desktop`
+quand « Bureau et Documents » est activé). Avec « Optimiser le stockage du Mac », macOS retire du
+disque les fichiers peu utilisés (base SQLite, logs) ; la VM Docker ne peut pas les récupérer et le
+backend plante en boucle avec `Unknown system error -35`. Préférez par exemple `~/fablab-ai`.
+
+Après un redémarrage du Mac, relancez `colima start` (ou `./install.sh` / `./doctor.sh`, qui le
+proposent) avant d'utiliser l'application.
+
 `./doctor.sh --check-only` vérifie tous ces prérequis (dont `rsync` et l'accès au dépôt de
 mises à jour) sans rien modifier.
 
@@ -98,6 +119,18 @@ Voir [CONFIGURATION.md](CONFIGURATION.md) pour le détail des variables d'enviro
 fichier de branding (`backend/data/branding.json`) qui pilote le nom du projet, les textes
 affichés et le périmètre de la bride thématique.
 
+## Droits des fichiers : aucun sudo nécessaire
+
+Le backend ne tourne plus en root : au démarrage, il rend `backend/uploads`, `backend/logs` et
+`backend/data` à l'utilisateur propriétaire du projet (`APP_UID`/`APP_GID` dans `.env`, remplis par
+`install.sh`), puis abandonne ses droits root. L'updater rend lui aussi le projet à son propriétaire
+après chaque mise à jour ou restauration. Résultat : `./update.sh`, `git pull` ou la suppression de
+fichiers ne demandent jamais `sudo`.
+
+Une installation plus ancienne peut contenir des fichiers appartenant à root : `./doctor.sh` les
+détecte et les rend au propriétaire via un conteneur Docker jetable, sans sudo (il suffit que
+l'utilisateur ait accès à Docker).
+
 ## Accès depuis le réseau local
 
 Depuis un autre appareil du même réseau : `http://IP_DE_LA_MACHINE:3000`. Récupérer l'IP locale :
@@ -127,8 +160,14 @@ interventions non interactives car il accepte les corrections proposées.
 
 | Symptôme | Cause probable | Solution |
 |---|---|---|
-| `docker: command not found` | Docker non installé | Installer Docker Desktop (Mac/Windows) ou Docker Engine (Linux) |
-| `Cannot connect to the Docker daemon` | Docker installé mais pas démarré | Démarrer Docker Desktop ou `sudo systemctl start docker` |
+| `docker: command not found` | Docker non installé | Linux : installé automatiquement par `install.sh`. macOS avec Homebrew : `install.sh` installe Colima + docker + compose + buildx sans sudo. Sinon Docker Desktop |
+| `Cannot connect to the Docker daemon` | Docker installé mais pas démarré | `install.sh` tente de le démarrer (Docker Desktop, Colima ou `systemctl`). Manuellement : ouvrir Docker Desktop, `colima start --cpu 4 --memory 8` ou `sudo systemctl start docker` |
+| `docker: unknown command: docker compose` (macOS, Docker via Homebrew) | Le CLI ne trouve pas les plugins Homebrew | Automatique via `install.sh` / `./doctor.sh`. Manuellement : ajouter `"cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]` dans `~/.docker/config.json` |
+| Ollama tué (`signal: killed`, OOM) sous Colima | VM Colima lancée avec 2 Go de RAM (défaut) | `colima stop && colima start --cpu 4 --memory 8` (`install.sh` dimensionne la VM à la moitié de la RAM du Mac) |
+| Backend en redémarrage en boucle, `Unknown system error -35` (`EDEADLK`) dans `logger.js` ou SQLite (macOS) | Projet dans un dossier iCloud : fichiers retirés du disque (« Optimiser le stockage ») | `./doctor.sh` force leur téléchargement (`install.sh` aussi), puis `docker compose restart backend`. Solution durable : déplacer le projet hors d'iCloud |
+| `Permission denied` pendant `./update.sh`, `git pull` ou `rm` dans `backend/` | Fichiers créés en root par une ancienne version | `./doctor.sh` (section « Propriétaire des fichiers ») les rend au propriétaire sans sudo |
+| Pièce jointe « Indexation échouée » dans l'administration | Ollama indisponible ou fichier sans texte exploitable (PDF scanné) | Bouton « Réindexer » ; un PDF composé uniquement d'images n'est pas lisible (pas d'OCR) |
+| `syntax error near unexpected token` en plein `install.sh` | Le script a été modifié (mise à jour, `git pull`) pendant son exécution | Relancer `./install.sh` : les images déjà construites sont réutilisées |
 | Port `3000` déjà utilisé | Un autre service occupe le port | Changer `PORT` dans `.env` puis relancer `docker compose up -d` |
 | Ollama ne répond pas après l'installation | Modèle encore en cours de téléchargement | Vérifier `docker compose logs -f ollama` |
 | Page admin bloquée en local uniquement | `ADMIN_ACCESS_MODE=local` actif alors qu'on accède depuis un autre poste | Repasser à `ADMIN_ACCESS_MODE=any` si l'accès distant est voulu |

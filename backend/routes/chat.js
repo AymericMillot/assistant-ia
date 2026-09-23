@@ -1,3 +1,4 @@
+import fsp from "fs/promises";
 import express from "express";
 import path from "path";
 import { getLiveChatEstimate } from "../services/analyticsService.js";
@@ -24,6 +25,7 @@ import { getConversationContextSummary } from "../services/ragService.js";
 import { markActivity } from "../services/schedulerService.js";
 import {
   attachmentUploadMiddleware,
+  getAttachmentLimits,
   saveUserAttachment
 } from "../services/attachmentService.js";
 import { recordAnswerRating } from "../services/ratingService.js";
@@ -203,6 +205,7 @@ router.post("/", chatStreamRateLimiter, requireReasoningRateLimit, async (req, r
       folderName: "all",
       history,
       attachmentIds,
+      sessionId,
       useReasoningModel
     });
     let savedExchange = null;
@@ -234,7 +237,9 @@ function handleAttachmentUpload(req, res, next) {
   attachmentUploadMiddleware.single("file")(req, res, (error) => {
     if (error?.name === "MulterError" && error.code === "LIMIT_FILE_SIZE") {
       return res.status(413).json({
-        message: "La pièce jointe dépasse la taille maximale autorisée de 2 Mo."
+        message: `La pièce jointe dépasse la taille maximale autorisée de ${Math.round(
+          getAttachmentLimits().maxBytes / (1024 * 1024)
+        )} Mo.`
       });
     }
 
@@ -271,12 +276,19 @@ router.post(
         return res.status(400).json({ message: "Aucun fichier n'a été envoyé." });
       }
 
-      const sessionId = req.body?.sessionId
-        ? ensureUuidLike(req.body.sessionId, "Identifiant de session")
-        : null;
-      const question = req.body?.question
-        ? ensureSafeText(req.body.question, "Question", { max: 4000 })
-        : null;
+      let sessionId;
+      let question;
+      try {
+        // La session est obligatoire : elle rattache la piece jointe a sa
+        // conversation (seule autorisee a s'en servir tant qu'elle n'est pas triee).
+        sessionId = ensureUuidLike(req.body?.sessionId, "Identifiant de session");
+        question = req.body?.question
+          ? ensureSafeText(req.body.question, "Question", { max: 4000 })
+          : null;
+      } catch (validationError) {
+        await fsp.unlink(req.file.path).catch(() => undefined);
+        throw validationError;
+      }
 
       markActivity();
       const payload = await saveUserAttachment(req.file, { sessionId, question });
@@ -381,6 +393,7 @@ router.post("/stream", chatStreamRateLimiter, requireReasoningRateLimit, async (
       folderName: "all",
       history,
       attachmentIds,
+      sessionId,
       useReasoningModel,
       persistExchange: (finalText, retrievalMetadata) =>
         saveConversationExchange({

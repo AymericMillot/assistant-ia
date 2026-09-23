@@ -28,8 +28,16 @@ COPY --from=frontend-build /workspace/frontend/dist /app/public
 # egalement utilisee hors-ligne par ./help.sh).
 COPY docs/help.html /app/docs/help.html
 
-RUN mkdir -p /app/uploads /app/logs /app/data
+RUN mkdir -p /app/uploads /app/logs /app/data \
+  && chmod +x /app/docker-entrypoint.sh \
+  && command -v setpriv >/dev/null
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Demarre en root, rend uploads/logs/data a l'utilisateur du serveur puis
+# abandonne les droits root (voir docker-entrypoint.sh) : aucun sudo n'est
+# ensuite necessaire cote serveur pour mettre a jour ou nettoyer le projet.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+# node directement (et non npm start) : npm a besoin d'un HOME inscriptible et
+# relaie mal les signaux d'arret une fois les droits abandonnes.
+CMD ["node", "server.js"]

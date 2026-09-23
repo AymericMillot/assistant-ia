@@ -94,6 +94,31 @@ confirm() {
   [[ "$reply" =~ ^[oOyY] ]]
 }
 
+# Docker installe via Homebrew : le CLI ne trouve les plugins compose/buildx
+# que si leur dossier est declare dans ~/.docker/config.json.
+doctor_macos_register_brew_docker_plugins() {
+  local plugins_dir config_file
+  plugins_dir="$(brew --prefix)/lib/docker/cli-plugins"
+  config_file="${HOME}/.docker/config.json"
+  mkdir -p "${HOME}/.docker"
+  if [[ ! -s "$config_file" ]]; then
+    printf '{\n  "cliPluginsExtraDirs": ["%s"]\n}\n' "$plugins_dir" > "$config_file"
+    return 0
+  fi
+  grep -q "$plugins_dir" "$config_file" 2>/dev/null && return 0
+  python3 - "$config_file" "$plugins_dir" <<'PYEOF'
+import json, sys
+path, plugins = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    data = json.load(fh)
+dirs = data.setdefault("cliPluginsExtraDirs", [])
+if plugins not in dirs:
+    dirs.append(plugins)
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+PYEOF
+}
+
 # ---------------------------------------------------------------------------
 say_step "Docker"
 
@@ -111,9 +136,21 @@ if ! command -v docker >/dev/null 2>&1; then
         echo "  -> Installez manuellement : https://docs.docker.com/engine/install/ubuntu/"
       fi
     fi
+  elif [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+    echo "  -> Docker Desktop demande un mot de passe admin et une validation graphique ; Colima s'installe sans sudo."
+    if confirm "Installer Docker via Homebrew (colima docker docker-compose docker-buildx) maintenant ?"; then
+      if brew install colima docker docker-compose docker-buildx; then
+        doctor_macos_register_brew_docker_plugins
+        undo_last_fail
+        say_fixed "Docker installe via Homebrew (Colima). Demarrage : colima start --cpu 4 --memory 8"
+      else
+        say_fail "L'installation Homebrew de Docker a echoue."
+      fi
+    fi
   else
     echo "  -> Ubuntu : https://docs.docker.com/engine/install/ubuntu/"
-    echo "  -> macOS/Windows : installez Docker Desktop."
+    echo "  -> macOS : installez Docker Desktop, ou Homebrew puis : brew install colima docker docker-compose docker-buildx"
+    echo "  -> Windows : installez Docker Desktop."
   fi
 else
   say_ok "Docker est installe ($(docker --version 2>/dev/null))."
@@ -154,6 +191,16 @@ else
           say_fail "Impossible de demarrer le service docker."
         fi
       fi
+    elif [[ "$(uname -s)" == "Darwin" ]] && command -v colima >/dev/null 2>&1 && [[ ! -d /Applications/Docker.app ]]; then
+      say_fail "Le daemon Docker ne repond pas (la VM Colima n'est probablement pas demarree)."
+      if confirm "Demarrer Colima maintenant (colima start --cpu 4 --memory 8) ?"; then
+        if colima start --cpu 4 --memory 8 && docker context use colima >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+          undo_last_fail
+          say_fixed "Daemon Docker demarre (Colima)."
+        else
+          say_fail "Colima n'a pas pu demarrer : consultez 'colima status' et 'colima start --verbose'."
+        fi
+      fi
     elif [[ "$(uname -s)" == "Darwin" ]]; then
       say_fail "Le daemon Docker ne repond pas (Docker Desktop n'est probablement pas lance)."
       if command -v open >/dev/null 2>&1 && confirm "Lancer Docker Desktop maintenant ?"; then
@@ -183,21 +230,50 @@ else
     say_ok "Le plugin 'docker compose' (v2) est disponible."
   else
     say_fail "Le plugin 'docker compose' (v2) est introuvable (docker-compose v1 seul ne suffit pas)."
-    echo "  -> https://docs.docker.com/compose/install/linux/"
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+      # Docker installe via Homebrew : le plugin existe souvent deja mais le CLI
+      # ne le trouve pas tant que ~/.docker/config.json ne declare pas son dossier.
+      if confirm "Declarer les plugins Docker Homebrew dans ~/.docker/config.json (et installer docker-compose/docker-buildx si absents) ?"; then
+        [[ -x "$(brew --prefix)/lib/docker/cli-plugins/docker-compose" ]] || brew install docker-compose docker-buildx
+        doctor_macos_register_brew_docker_plugins
+        if docker compose version >/dev/null 2>&1; then
+          undo_last_fail
+          say_fixed "Plugin 'docker compose' disponible (plugins Homebrew declares)."
+        else
+          say_fail "Le plugin 'docker compose' reste introuvable."
+        fi
+      fi
+    else
+      echo "  -> https://docs.docker.com/compose/install/linux/"
+    fi
+  fi
+
+  # Colima demarre par defaut avec 2 Go de RAM : Ollama se fait tuer (OOM) au
+  # chargement du modele. On signale une VM sous-dimensionnee.
+  if [[ "$(uname -s)" == "Darwin" ]] && docker info >/dev/null 2>&1; then
+    docker_mem_bytes="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
+    if [[ "$docker_mem_bytes" =~ ^[0-9]+$ ]] && (( docker_mem_bytes > 0 && docker_mem_bytes < 6000000000 )); then
+      say_warn "La VM Docker ne dispose que de $((docker_mem_bytes / 1048576)) Mo de RAM : Ollama risque d'etre tue (OOM) au chargement du modele."
+      if command -v colima >/dev/null 2>&1 && docker context show 2>/dev/null | grep -q colima; then
+        echo "  -> colima stop && colima start --cpu 4 --memory 8"
+      else
+        echo "  -> Docker Desktop > Settings > Resources : allouez au moins 8 Go de RAM."
+      fi
+    fi
   fi
 
   # install.sh/update.sh/doctor.sh redirigent ou capturent systematiquement la
-  # sortie des builds Docker. Sans BUILDKIT_PROGRESS=plain, BuildKit essaie
-  # quand meme son mode de progression TTY et echoue avec "failed to get
-  # console: provided file is not a console" (frequent sur Docker Desktop
-  # macOS). .project-tools.sh l'exporte pour tous les scripts qui le sourcent ;
-  # cette verification protege le cas ou doctor.sh serait execute seul, hors
-  # de ces scripts, avec une version anterieure du fichier partage.
-  if [[ "${BUILDKIT_PROGRESS:-}" == "plain" ]]; then
-    say_ok "BUILDKIT_PROGRESS=plain : les echecs de build \"failed to get console\" sont evites."
+  # sortie des builds Docker. Si stderr est un terminal mais pas stdout,
+  # Docker Compose choisit son affichage TTY et echoue avec "failed to get
+  # console: provided file is not a console". Compose v2.2x+/v5 ignore
+  # BUILDKIT_PROGRESS : seul COMPOSE_PROGRESS=plain l'evite.
+  # .project-tools.sh l'exporte pour tous les scripts qui le sourcent ; cette
+  # verification protege le cas d'une version anterieure du fichier partage.
+  if [[ "${COMPOSE_PROGRESS:-}" =~ ^(plain|quiet|json)$ ]]; then
+    say_ok "COMPOSE_PROGRESS=${COMPOSE_PROGRESS} : les echecs de build \"failed to get console\" sont evites."
   else
-    say_fail "BUILDKIT_PROGRESS n'est pas force a 'plain' dans cette execution : un build Docker dont la sortie est redirigee peut echouer avec \"failed to get console: provided file is not a console\" (frequent sur Docker Desktop macOS)."
-    echo "  -> Corrige automatiquement par install.sh/.project-tools.sh a jour ; relancez avec BUILDKIT_PROGRESS=plain ./doctor.sh si le message persiste."
+    say_fail "COMPOSE_PROGRESS n'est pas force a 'plain' dans cette execution : un build Docker dont la sortie est redirigee peut echouer avec \"failed to get console: provided file is not a console\" (BUILDKIT_PROGRESS seul ne suffit pas avec Docker Compose recent)."
+    echo "  -> Corrige automatiquement par install.sh/.project-tools.sh a jour ; relancez avec COMPOSE_PROGRESS=plain ./doctor.sh si le message persiste."
   fi
 fi
 
@@ -546,6 +622,86 @@ fi
 rm -f "$compose_error_file"
 
 # ---------------------------------------------------------------------------
+say_step "iCloud Drive (macOS)"
+
+# Projet place dans ~/Documents ou ~/Desktop synchronises par iCloud avec
+# "Optimiser le stockage" : macOS evince les fichiers peu utilises (drapeau
+# "dataless"). La VM Docker ne peut pas les retelecharger et le backend plante
+# en boucle avec "Unknown system error -35" (EDEADLK) sur logger.js/SQLite.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  icloud_targets=()
+  for icloud_target in backend/data backend/uploads backend/logs version.json update.config.json .env docker-compose.yml; do
+    [[ -e "$ROOT_DIR/$icloud_target" ]] && icloud_targets+=("$ROOT_DIR/$icloud_target")
+  done
+  dataless_count=0
+  if (( ${#icloud_targets[@]} )); then
+    dataless_count="$(find "${icloud_targets[@]}" -flags +dataless -type f 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [[ "${dataless_count:-0}" -eq 0 ]]; then
+    say_ok "Aucun fichier monte dans Docker n'est evince par iCloud."
+  else
+    say_fail "${dataless_count} fichier(s) montes dans Docker sont evinces par iCloud (stockage optimise) : le backend echouera avec 'Unknown system error -35'."
+    if confirm "Forcer leur telechargement maintenant ?"; then
+      find "${icloud_targets[@]}" -flags +dataless -type f -print0 2>/dev/null | xargs -0 -n 20 -P 8 cat >/dev/null 2>&1 || true
+      dataless_count="$(find "${icloud_targets[@]}" -flags +dataless -type f 2>/dev/null | wc -l | tr -d ' ')"
+      if [[ "${dataless_count:-0}" -eq 0 ]]; then
+        undo_last_fail
+        say_fixed "Fichiers iCloud telecharges. Redemarrez le backend : docker compose restart backend"
+      else
+        say_fail "${dataless_count} fichier(s) restent evinces (iCloud hors ligne ?)."
+      fi
+    fi
+  fi
+  case "$ROOT_DIR" in
+    "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Library/Mobile Documents"/*)
+      if [[ -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs" ]]; then
+        say_warn "Le projet est dans un dossier pouvant etre synchronise par iCloud (${ROOT_DIR}) : macOS peut evincer ses fichiers a tout moment."
+        echo "  -> Deplacez-le hors d'iCloud (ex : ~/fablab-ai) ou desactivez 'Optimiser le stockage du Mac'."
+      fi
+      ;;
+  esac
+else
+  say_ok "Non concerne (pas macOS)."
+fi
+
+# ---------------------------------------------------------------------------
+say_step "Proprietaire des fichiers (mises a jour sans sudo)"
+
+# Fichiers laisses a root par une ancienne version (backend/updater en root) :
+# ils obligeraient a utiliser sudo pour ./update.sh, git pull ou un nettoyage.
+foreign_count="$(count_foreign_owned_files)"
+project_owner="$(project_owner_ids)"
+if [[ "${project_owner%%:*}" == "0" ]]; then
+  say_ok "Projet installe par root : pas de verification de proprietaire."
+elif [[ "${foreign_count:-0}" -eq 0 ]]; then
+  say_ok "Tous les fichiers du projet appartiennent a son proprietaire (${project_owner})."
+else
+  say_fail "${foreign_count} fichier(s) du projet n'appartiennent pas a son proprietaire (${project_owner}) : ./update.sh ou un nettoyage demanderaient sudo."
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 \
+    && confirm "Rendre ces fichiers au proprietaire du projet via Docker (sans sudo) ?"; then
+    repair_workspace_ownership
+    foreign_count="$(count_foreign_owned_files)"
+    if [[ "${foreign_count:-0}" -eq 0 ]]; then
+      undo_last_fail
+      say_fixed "Proprietaire des fichiers retabli (${project_owner})."
+    else
+      say_fail "${foreign_count} fichier(s) ont toujours un autre proprietaire."
+    fi
+  fi
+fi
+
+app_uid_value="$(get_env_value "APP_UID")"
+if [[ -f "$ENV_FILE" && -z "$app_uid_value" && "${project_owner%%:*}" != "0" ]]; then
+  say_warn "APP_UID/APP_GID absents de .env : le backend deduit son identite du proprietaire de backend/data."
+  if confirm "Ecrire APP_UID=${project_owner%%:*} et APP_GID=${project_owner##*:} dans .env ?"; then
+    update_env_value "APP_UID" "${project_owner%%:*}"
+    update_env_value "APP_GID" "${project_owner##*:}"
+    undo_last_warn
+    say_fixed "APP_UID/APP_GID ajoutes a .env (pris en compte au prochain redemarrage du backend)."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 say_step "Port et repertoires"
 
 SERVER_PORT="$(get_server_port)"
@@ -553,7 +709,12 @@ if command -v lsof >/dev/null 2>&1; then
   port_pid="$(lsof -i ":${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
   if [[ -n "$port_pid" ]]; then
     port_cmd="$(ps -p "$port_pid" -o comm= 2>/dev/null || true)"
-    if [[ "$port_cmd" == *"docker"* || "$port_cmd" == *"com.docker"* ]]; then
+    # Avec Colima (et Lima/Rancher Desktop), le port publie est relaye par un
+    # processus "ssh: ~/.colima/.../ssh.sock [mux]" ou "limactl" et non par un
+    # binaire "docker" : on verifie aussi que le backend publie bien ce port.
+    if [[ "$port_cmd" == *"docker"* || "$port_cmd" == *"com.docker"* ]] \
+      || { [[ "$port_cmd" == *"colima"* || "$port_cmd" == *"lima"* ]] \
+        && docker port assistant-ia-backend "${SERVER_PORT}/tcp" 2>/dev/null | grep -Eq ":${SERVER_PORT}$"; }; then
       say_ok "Le port ${SERVER_PORT} est occupe par Docker (normal, c'est le service backend)."
     else
       say_fail "Le port ${SERVER_PORT} est deja utilise par un autre processus (${port_cmd:-pid $port_pid})."

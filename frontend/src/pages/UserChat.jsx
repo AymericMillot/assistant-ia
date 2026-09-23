@@ -304,14 +304,34 @@ function buildConversationMemory(messages, currentQuestion = "") {
 const defaultMessages = [
 ];
 
-const attachmentAcceptedExtensions = ".txt,.text,.md,.markdown,.csv,.log,.pdf";
-const attachmentHelpLabel = "Joindre un fichier texte ou PDF (txt, md, csv, log, pdf — 2 Mo max)";
+const defaultAttachmentExtensions = [".txt", ".text", ".md", ".markdown", ".csv", ".log", ".pdf", ".docx", ".xlsx"];
+const defaultAttachmentMaxBytes = 5 * 1024 * 1024;
 const attachmentLockedLabel =
   "Ajout de pièces jointes temporairement indisponible (maintenance technique et sécurité).";
-const attachmentMaxCount = 3;
+
+function describeAttachmentLimits(limits) {
+  const extensions = limits?.extensions?.length ? limits.extensions : defaultAttachmentExtensions;
+  const maxMegabytes = Math.round((limits?.maxBytes || defaultAttachmentMaxBytes) / (1024 * 1024));
+  const visibleExtensions = extensions.filter((extension) => ![".text", ".markdown"].includes(extension));
+  return {
+    accept: extensions.join(","),
+    maxBytes: limits?.maxBytes || defaultAttachmentMaxBytes,
+    maxCount: limits?.perQuestion || 3,
+    label: `Joindre un fichier que l'assistant lira pour répondre (${visibleExtensions
+      .map((extension) => extension.slice(1))
+      .join(", ")} — ${maxMegabytes} Mo max)`,
+    errorHint: `Vérifiez qu'il s'agit d'un fichier ${visibleExtensions
+      .map((extension) => extension.slice(1))
+      .join(", ")} de moins de ${maxMegabytes} Mo contenant du texte.`
+  };
+}
 
 export default function UserChat() {
   const branding = useBranding();
+  const attachmentConfig = describeAttachmentLimits(branding.attachmentLimits);
+  const attachmentAcceptedExtensions = attachmentConfig.accept;
+  const attachmentHelpLabel = attachmentConfig.label;
+  const attachmentMaxCount = attachmentConfig.maxCount;
   // Mémoire de conversation strictement en RAM : elle disparait au rechargement de la page.
   const [messages, setMessages] = useState(defaultMessages);
   const [question, setQuestion] = useState("");
@@ -470,6 +490,11 @@ export default function UserChat() {
       return;
     }
 
+    if (file.size > attachmentConfig.maxBytes) {
+      setError(`Le fichier « ${file.name} » est trop volumineux. ${attachmentConfig.errorHint}`);
+      return;
+    }
+
     setError("");
     setAttachmentUploading(true);
 
@@ -505,7 +530,7 @@ export default function UserChat() {
         reportError(
           "chat:attachment",
           uploadError,
-          "L'envoi de la pièce jointe a échoué. Vérifiez qu'il s'agit d'un fichier texte ou PDF de moins de 2 Mo."
+          `L'envoi de la pièce jointe a échoué. ${attachmentConfig.errorHint}`
         )
       );
     } finally {
@@ -568,7 +593,10 @@ export default function UserChat() {
     }
   }
 
-  async function askQuestion(questionText, { baseMessages = messages, attachmentIds = [] } = {}) {
+  async function askQuestion(
+    questionText,
+    { baseMessages = messages, attachmentIds = [], attachmentNames = [] } = {}
+  ) {
     const trimmedQuestion = questionText.trim();
     if (!trimmedQuestion || loading) {
       return;
@@ -581,6 +609,7 @@ export default function UserChat() {
       id: `${Date.now()}-user`,
       role: "user",
       content: trimmedQuestion,
+      attachmentNames,
       timestamp: Date.now()
     };
 
@@ -819,7 +848,8 @@ export default function UserChat() {
     event.preventDefault();
     askQuestion(question, {
       baseMessages: messages,
-      attachmentIds: attachments.map((entry) => entry.id)
+      attachmentIds: attachments.map((entry) => entry.id),
+      attachmentNames: attachments.map((entry) => entry.name)
     });
   }
 
@@ -1023,6 +1053,21 @@ export default function UserChat() {
                     </details>
                   )
                 ) : null}
+
+                {message.role === "user" && message.attachmentNames?.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {message.attachmentNames.map((name) => (
+                      <span
+                        key={name}
+                        className="inline-flex max-w-[220px] items-center gap-1 rounded-full bg-white/15 px-2.5 py-0.5 text-[12px] dark:bg-slate-900/10"
+                        title={name}
+                      >
+                        <span aria-hidden="true">📎</span>
+                        <span className="truncate">{name}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
 
                 {message.content ? (
                   <p className="whitespace-pre-wrap text-[15px] leading-7">

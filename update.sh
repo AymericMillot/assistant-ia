@@ -136,30 +136,51 @@ apply_remote_package_from_host() {
   validate_package_root "$package_root"
 
   echo "[58%] Application des nouveaux fichiers..."
+  # Meme socle que MANDATORY_PRESERVED_PATHS cote updater (updater/server.js).
+  # version.json est exclu ici et ecrit en dernier, une fois la nouvelle
+  # version demarree : en cas d'echec, la mise a jour reste detectee comme
+  # disponible et ./update.sh peut simplement etre relance.
   preserve_paths=(
     ".env"
     "update.config.json"
+    "version.json"
     "backend/uploads"
     "backend/logs"
     "backend/data"
     ".git"
     ".update-backups"
+    ".update-release-cache.json"
+    ".update-state.json"
     "assistant-ia-admin-cookie.txt"
     "export"
     "release"
+    "backend/node_modules"
+    "frontend/node_modules"
+    "updater/node_modules"
   )
 
-  rsync_args=(-a --delete)
+  # Fichiers d'environnement locaux (.env.publish...) : preserves, sauf les
+  # modeles *.example fournis par la release (les --include passent en premier).
+  rsync_args=(-a --delete --include=/.env.example --include=/.env.publish.example --exclude=/.env.*)
   for preserve_path in "${preserve_paths[@]}"; do
     rsync_args+=("--exclude=/${preserve_path}")
   done
 
+  # Fichiers laisses a root par une ancienne mise a jour lancee depuis
+  # l'interface : rsync ne pourrait pas les remplacer sans sudo.
+  if [[ "$(count_foreign_owned_files)" -gt 0 ]]; then
+    repair_workspace_ownership || true
+  fi
+
   rsync "${rsync_args[@]}" "$package_root"/ "$ROOT_DIR"/
 
-  echo "[78%] Redémarrage du backend avec le frontend embarqué..."
-  if ! docker_compose_up_build backend updater; then
+  # Toute la pile (et non plus seulement backend/updater) : une nouvelle version
+  # peut ajouter un service ou modifier Ollama/ChromaDB/Redis dans
+  # docker-compose.yml. Compose ne recree que ce qui a change.
+  echo "[78%] Reconstruction et redémarrage des services..."
+  if ! docker_compose_up_build; then
     echo "Les nouveaux fichiers sont en place mais la reconstruction des conteneurs a echoue." >&2
-    echo "  -> Relancez ./update.sh (elle reprendra la reconstruction avec les fichiers deja synchronises)." >&2
+    echo "  -> Relancez ./update.sh : la version n'etant pas encore marquee installee, la mise a jour sera reappliquee." >&2
     echo "  -> Ou revenez a la version precedente depuis l'onglet « Mises a jour » de l'administration." >&2
     echo "  -> Diagnostic : ./doctor.sh" >&2
     return 1
@@ -168,6 +189,12 @@ apply_remote_package_from_host() {
     echo "Le backend a ete reconstruit mais ne repond pas encore : consultez les logs ci-dessus." >&2
     echo "  -> Revenez a la version precedente depuis l'onglet « Mises a jour » si le probleme persiste." >&2
     return 1
+  fi
+
+  # Ecriture sur place (cat >, meme inode) : version.json est monte fichier par
+  # fichier dans le backend, un remplacement par renommage n'y serait pas vu.
+  if [[ -f "$package_root/version.json" ]]; then
+    cat "$package_root/version.json" > "$ROOT_DIR/version.json"
   fi
 
   echo "[100%] Mise à jour terminée."
