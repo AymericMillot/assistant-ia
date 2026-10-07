@@ -35,7 +35,7 @@ else
 fi
 
 echo "Demarrage du service de mise a jour..."
-if ! docker_compose_up_required updater; then
+if ! ensure_updater_running; then
   echo "Le service de mise a jour n'a pas pu demarrer : le projet ne peut pas fonctionner correctement sans lui." >&2
   exit 1
 fi

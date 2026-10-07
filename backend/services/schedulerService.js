@@ -26,6 +26,8 @@ let attachmentCleanupInterval = null;
 let autoUpdateInterval = null;
 let schedulerCheckInFlight = false;
 let autoUpdateCheckInFlight = false;
+let backupCheckInFlight = false;
+let backupInterval = null;
 let lastPriorityWaitLogAt = 0;
 
 function sleep(ms) {
@@ -212,8 +214,9 @@ async function maybeRunScheduledUpdate() {
       return;
     }
 
+    const deferredMinutes = minutesSinceMidnight(currentTime) - minutesSinceMidnight(scheduledTime);
+
     if (isAssistantBusy()) {
-      const deferredMinutes = minutesSinceMidnight(currentTime) - minutesSinceMidnight(scheduledTime);
       if (deferredMinutes > autoUpdateMaxDeferMinutes) {
         setSetting("lastAutoUpdateRunDate", today);
         logger.warn(
@@ -230,6 +233,15 @@ async function maybeRunScheduledUpdate() {
     setSetting("lastAutoUpdateRunDate", today);
 
     const status = await updateServiceModule.getUpdateStatus();
+    // Service de mise a jour momentanement injoignable (redemarrage, Docker
+    // lent au reveil) ou source distante en echec : la journee n'est pas
+    // consommee, on retente au tick suivant tant que la fenetre de report
+    // n'est pas depassee.
+    const checkFailed = status?.state?.status === "unavailable" || (!status?.release && status?.warning);
+    if (checkFailed && deferredMinutes <= autoUpdateMaxDeferMinutes) {
+      setSetting("lastAutoUpdateRunDate", "");
+      return;
+    }
     if (!status?.updateAvailable) {
       logger.info("Mise a jour automatique : aucune nouvelle version disponible.", {
         scheduledTime,
@@ -244,7 +256,16 @@ async function maybeRunScheduledUpdate() {
       targetVersion: status.latestVersion
     });
 
-    await updateServiceModule.applyUpdate();
+    try {
+      await updateServiceModule.applyUpdate();
+    } catch (applyError) {
+      if (applyError?.code === "UPDATER_UNAVAILABLE" && deferredMinutes <= autoUpdateMaxDeferMinutes) {
+        setSetting("lastAutoUpdateRunDate", "");
+        logger.warn("Mise a jour automatique reportee : service de mise a jour injoignable, nouvel essai.");
+        return;
+      }
+      throw applyError;
+    }
     insertAuditLogEntry({
       actorRole: "system",
       action: "update.apply.scheduled",
@@ -261,6 +282,62 @@ async function maybeRunScheduledUpdate() {
   }
 }
 
+// Sauvegarde quotidienne a l'heure choisie dans l'administration (03:00 par
+// defaut). Reportee tant qu'une conversation est en cours, abandonnee pour la
+// journee au-dela de 3 heures de report.
+async function maybeRunScheduledBackup() {
+  if (backupCheckInFlight) {
+    return;
+  }
+
+  backupCheckInFlight = true;
+
+  try {
+    const [{ getSetting, setSetting, insertAuditLogEntry }, backupModule] = await Promise.all([
+      import("../config/db.js"),
+      import("./backupService.js")
+    ]);
+
+    const schedule = backupModule.getBackupSchedule();
+    if (!schedule.enabled) {
+      return;
+    }
+
+    const { date: today, time: currentTime } = getZonedDateAndTime(schedulerTimeZone);
+    if (getSetting("lastScheduledBackupDate", "") === today) {
+      return;
+    }
+
+    const delayMinutes = minutesSinceMidnight(currentTime) - minutesSinceMidnight(schedule.time);
+    if (delayMinutes < 0) {
+      return;
+    }
+
+    if (isAssistantBusy() || backupModule.isBackupOperationRunning()) {
+      if (delayMinutes > autoUpdateMaxDeferMinutes) {
+        setSetting("lastScheduledBackupDate", today);
+        logger.warn("Sauvegarde automatique annulee pour aujourd'hui : assistant occupe trop longtemps.");
+      }
+      return;
+    }
+
+    setSetting("lastScheduledBackupDate", today);
+    const backup = await backupModule.createBackup({ trigger: "auto" });
+    insertAuditLogEntry({
+      actorRole: "system",
+      action: "backup.create.scheduled",
+      targetType: "backup",
+      targetId: backup.name
+    });
+  } catch (error) {
+    logger.error("Erreur pendant la sauvegarde automatique programmee.", {
+      message: error.message
+    });
+  } finally {
+    backupCheckInFlight = false;
+  }
+}
+
 async function runAttachmentCleanup() {
   try {
     const { cleanupExpiredAttachments } = await import("./attachmentService.js");
@@ -269,6 +346,19 @@ async function runAttachmentCleanup() {
     logger.error("Erreur pendant le nettoyage des pieces jointes expirees.", {
       message: error.message
     });
+  }
+}
+
+async function runDatabaseMaintenance() {
+  try {
+    const { optimizeDatabase, pruneRetrievalScoreLogs } = await import("../config/db.js");
+    const removed = pruneRetrievalScoreLogs();
+    optimizeDatabase();
+    if (removed > 0) {
+      logger.info("Journal des scores de recherche allege.", { removed });
+    }
+  } catch (error) {
+    logger.warn("Entretien de la base SQLite ignore.", { message: error.message });
   }
 }
 
@@ -296,7 +386,11 @@ export function initializeSchedulerService() {
   // Les pieces jointes non triees par l'admin sont supprimees apres 30 jours :
   // un passage au demarrage puis un controle periodique.
   runAttachmentCleanup();
-  attachmentCleanupInterval = setInterval(runAttachmentCleanup, attachmentCleanupIntervalMs);
+  runDatabaseMaintenance();
+  attachmentCleanupInterval = setInterval(() => {
+    runAttachmentCleanup();
+    runDatabaseMaintenance();
+  }, attachmentCleanupIntervalMs);
 
   if (autoUpdateInterval) {
     clearInterval(autoUpdateInterval);
@@ -309,6 +403,16 @@ export function initializeSchedulerService() {
       });
     });
   }, autoUpdateCheckMs);
+
+  if (backupInterval) {
+    clearInterval(backupInterval);
+  }
+
+  backupInterval = setInterval(() => {
+    maybeRunScheduledBackup().catch((error) => {
+      logger.error("Erreur du scheduler de sauvegarde.", { message: error.message });
+    });
+  }, 60 * 1000);
 }
 
 export function shutdownSchedulerService() {
@@ -325,6 +429,11 @@ export function shutdownSchedulerService() {
   if (autoUpdateInterval) {
     clearInterval(autoUpdateInterval);
     autoUpdateInterval = null;
+  }
+
+  if (backupInterval) {
+    clearInterval(backupInterval);
+    backupInterval = null;
   }
 
   activeChatCount = 0;

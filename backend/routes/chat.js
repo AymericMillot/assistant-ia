@@ -29,6 +29,8 @@ import {
   saveUserAttachment
 } from "../services/attachmentService.js";
 import { recordAnswerRating } from "../services/ratingService.js";
+import { getChatHomePayload } from "../services/chatHomeService.js";
+import { logger } from "../config/logger.js";
 import {
   createRateLimiter,
   ensureSafeText,
@@ -94,9 +96,27 @@ function parseAttachmentIds(value) {
   ];
 }
 
+function parseSkillId(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+const maxHistoryMessages = 60;
+const maxHistoryMessageCharacters = 16000;
+// Commentaire SSE periodique : pendant le chargement d'un modele (parfois plus
+// d'une minute), un proxy inverse couperait sinon un flux reste silencieux.
+const sseHeartbeatIntervalMs = Math.max(5000, Number(process.env.SSE_HEARTBEAT_INTERVAL_MS || 15000));
+
 function writeSseEvent(res, eventName, payload) {
-  res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  if (res.writableEnded || res.destroyed) {
+    return;
+  }
+
+  res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 function sanitizeConversationMessages(history) {
@@ -104,8 +124,10 @@ function sanitizeConversationMessages(history) {
     return [];
   }
 
+  // Fenetre large : c'est le serveur qui decide ensuite, selon la fenetre de
+  // contexte du modele, ce qui est repris mot pour mot ou condense.
   return history
-    .slice(-10)
+    .slice(-maxHistoryMessages)
     .map((entry) => {
       if (!entry || typeof entry !== "object") {
         return null;
@@ -115,14 +137,20 @@ function sanitizeConversationMessages(history) {
         return null;
       }
 
-      try {
-        return {
-          role: entry.role,
-          content: ensureSafeText(entry.content, "Contenu d'historique", { min: 1, max: 4000 })
-        };
-      } catch {
+      if (typeof entry.content !== "string" || !entry.content.trim()) {
         return null;
       }
+
+      // Les longues reponses sont tronquees plutot qu'ecartees : les ignorer
+      // faisait perdre le fil de la conversation aux questions de suivi.
+      const content = entry.content.trim();
+      return {
+        role: entry.role,
+        content:
+          content.length > maxHistoryMessageCharacters
+            ? `${content.slice(0, maxHistoryMessageCharacters)}…`
+            : content
+      };
     })
     .filter(Boolean);
 }
@@ -161,6 +189,16 @@ function extractConversationPayload(body) {
   };
 }
 
+// Accueil du chat : annonce active, questions suggerees et skills proposes.
+router.get("/home", (_req, res, next) => {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(getChatHomePayload());
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/folders", async (_req, res, next) => {
   try {
     const folders = await listFolders();
@@ -198,6 +236,7 @@ router.post("/", chatStreamRateLimiter, requireReasoningRateLimit, async (req, r
     const { question, history, sessionId } = extractConversationPayload(req.body);
     const attachmentIds = parseAttachmentIds(req.body?.attachmentIds);
     const useReasoningModel = Boolean(req.body?.useReasoningModel);
+    const skillId = parseSkillId(req.body?.skillId);
     markActivity();
 
     const payload = await generateChatResponse({
@@ -206,7 +245,8 @@ router.post("/", chatStreamRateLimiter, requireReasoningRateLimit, async (req, r
       history,
       attachmentIds,
       sessionId,
-      useReasoningModel
+      useReasoningModel,
+      skillId
     });
     let savedExchange = null;
 
@@ -340,13 +380,22 @@ router.get("/documents/:id/download", async (req, res, next) => {
 
     const absolutePath = getAbsoluteDocumentPath(document.relative_path);
     const fileName = document.original_name || path.basename(document.relative_path);
-    const wantsInline = String(req.query?.disposition || "").toLowerCase() === "inline";
+    const mimeType = String(document.mime_type || "").toLowerCase();
+    // Affichage dans le navigateur reserve aux formats inertes : un document
+    // HTML ou SVG ouvert sur ce domaine pourrait executer du contenu actif a
+    // cote de l'administration. Les autres formats sont toujours telecharges.
+    const canDisplayInline =
+      mimeType === "application/pdf" ||
+      mimeType === "text/plain" ||
+      /^image\/(png|jpe?g|gif|webp)$/.test(mimeType);
+    const wantsInline = String(req.query?.disposition || "").toLowerCase() === "inline" && canDisplayInline;
 
     if (wantsInline) {
-      if (document.mime_type) {
-        res.type(document.mime_type);
-      }
-      res.setHeader("Content-Disposition", `inline; filename="${fileName.replace(/"/g, "")}"`);
+      res.type(mimeType);
+      // res.attachment encode correctement les noms accentues (RFC 5987) ;
+      // seule la disposition est ensuite passee en "inline".
+      res.attachment(fileName);
+      res.setHeader("Content-Disposition", String(res.getHeader("Content-Disposition")).replace(/^attachment/, "inline"));
       return res.sendFile(absolutePath);
     }
 
@@ -357,33 +406,60 @@ router.get("/documents/:id/download", async (req, res, next) => {
 });
 
 router.post("/stream", chatStreamRateLimiter, requireReasoningRateLimit, async (req, res, next) => {
+  let heartbeat = null;
   try {
     const { question, history, sessionId } = extractConversationPayload(req.body);
     const clientId = ensureUuidLike(req.body?.clientId, "Identifiant client");
     const attachmentIds = parseAttachmentIds(req.body?.attachmentIds);
     const useReasoningModel = Boolean(req.body?.useReasoningModel);
+    const skillId = parseSkillId(req.body?.skillId);
 
     markActivity();
 
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive"
+      Connection: "keep-alive",
+      // Desactive la mise en tampon des proxys (nginx) : tokens affiches au fil de l'eau.
+      "X-Accel-Buffering": "no"
     });
 
     registerChatStream(clientId, res);
-    writeSseEvent(res, "session", { sessionId });
+    heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(": ping\n\n");
+      }
+    }, sseHeartbeatIntervalMs);
 
-    const contextModelName = (useReasoningModel && getActiveModelByRole("reasoning")) || getActiveModel();
-    writeSseEvent(res, "context", await getConversationContextSummary(history, contextModelName));
-
-    res.on("close", async () => {
+    // Enregistre avant toute attente : une page fermee pendant l'estimation du
+    // contexte doit elle aussi interrompre la generation.
+    res.on("close", () => {
+      clearInterval(heartbeat);
       if (res.writableEnded) {
         return;
       }
 
-      await cancelChatJobsForClient(clientId);
+      // Rejet capture : une file Redis momentanement indisponible ne doit pas
+      // faire tomber le serveur quand un utilisateur ferme sa page.
+      cancelChatJobsForClient(clientId).catch((error) => {
+        logger.warn("Annulation de la generation impossible.", { message: error.message });
+      });
     });
+
+    writeSseEvent(res, "session", { sessionId });
+
+    const contextModelName = (useReasoningModel && getActiveModelByRole("reasoning")) || getActiveModel();
+    // Estimation avant generation ; le chiffre exact suit une fois le prompt construit.
+    const contextEstimate = await getConversationContextSummary(history, contextModelName, {
+      isReasoning: Boolean(useReasoningModel && getActiveModelByRole("reasoning"))
+    }).catch(() => null);
+    if (contextEstimate) {
+      writeSseEvent(res, "context", contextEstimate);
+    }
+
+    if (res.destroyed || res.writableEnded) {
+      return;
+    }
 
     // L'échange est archivé avant l'événement final pour que le client reçoive
     // les identifiants nécessaires à l'évaluation de la réponse.
@@ -395,6 +471,7 @@ router.post("/stream", chatStreamRateLimiter, requireReasoningRateLimit, async (
       attachmentIds,
       sessionId,
       useReasoningModel,
+      skillId,
       persistExchange: (finalText, retrievalMetadata) =>
         saveConversationExchange({
           sessionId,
@@ -405,7 +482,22 @@ router.post("/stream", chatStreamRateLimiter, requireReasoningRateLimit, async (
         })
     });
   } catch (error) {
+    // Le flux SSE est deja ouvert : l'erreur a ete transmise au client sous
+    // forme d'evenement "error" (ou la connexion a ete fermee par le client).
+    // Repasser par le gestionnaire HTTP tenterait de renvoyer des en-tetes.
+    if (res.headersSent) {
+      if (error?.name !== "AbortError") {
+        logger.warn("Generation interrompue par une erreur.", { message: error.message });
+      }
+      if (!res.writableEnded) {
+        res.end();
+      }
+      return;
+    }
+
     next(error);
+  } finally {
+    clearInterval(heartbeat);
   }
 });
 

@@ -8,7 +8,10 @@ const updaterBaseUrl = process.env.UPDATER_URL || "http://updater:3010";
 // Docker interne (voir requireSharedToken cote updater). Optionnel pour rester
 // compatible avec les installations existantes.
 const updaterSharedToken = String(process.env.UPDATER_SHARED_TOKEN || "").trim();
-const updaterTimeoutMs = Number(process.env.UPDATER_TIMEOUT_MS || 12000);
+// Superieur au temps maximal que l'updater accorde a la source distante pour
+// repondre a /status (UPDATE_STATUS_REMOTE_WAIT_MS, 6 s) : un GitHub lent ne
+// doit pas etre confondu avec un service de mise a jour injoignable.
+const updaterTimeoutMs = Number(process.env.UPDATER_TIMEOUT_MS || 20000);
 // L'updater redemarre son propre conteneur apres chaque mise a jour (voir
 // triggerDetachedComposeUpdate cote updater) : il est normal qu'il soit brievement
 // injoignable pendant quelques secondes. On retente avant de declarer le service

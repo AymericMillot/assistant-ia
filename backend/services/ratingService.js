@@ -1,6 +1,7 @@
 import {
   getAnswerRatingStats,
   listAnswerRatings,
+  listAnswerRatingsWithGrounding,
   upsertAnswerRating
 } from "../config/db.js";
 import { getConversationBySessionId, getConversationExchanges } from "./conversationService.js";
@@ -8,6 +9,22 @@ import { getConversationBySessionId, getConversationExchanges } from "./conversa
 const ratingSignalMinScore = Number(process.env.RATING_SIGNAL_MIN_SCORE || 0.34);
 const ratingSignalMaxExamples = Number(process.env.RATING_SIGNAL_MAX_EXAMPLES || 2);
 const ratingSignalAnswerMaxChars = Number(process.env.RATING_SIGNAL_ANSWER_MAX_CHARS || 1200);
+// Les evaluations viennent d'utilisateurs anonymes : elles peuvent etre
+// desactivees comme signal de prompt (RATING_SIGNALS_ENABLED=false).
+const ratingSignalsEnabled = process.env.RATING_SIGNALS_ENABLED !== "false";
+
+// Une reponse ne sert de "bon exemple" que si elle s'appuyait sur des sources
+// internes : sinon un utilisateur pourrait faire ecrire n'importe quoi au
+// modele (injection dans sa question), le noter "utile", et l'imposer comme
+// reference aux reponses suivantes de tous les utilisateurs.
+function isGroundedRating(row) {
+  try {
+    const metadata = JSON.parse(row.retrieval_metadata || "{}");
+    return Boolean(metadata.groundingMode) && metadata.groundingMode !== "general";
+  } catch {
+    return false;
+  }
+}
 
 const ratingStopWords = new Set([
   "les",
@@ -151,12 +168,13 @@ export function getRatingsOverview({ limit = 30 } = {}) {
  */
 export function getRatingSignalsForQuestion(question) {
   const safeQuestion = String(question || "").trim();
-  if (!safeQuestion) {
+  if (!safeQuestion || !ratingSignalsEnabled) {
     return { goodExamples: [], badExamples: [] };
   }
 
   const buildExamples = (rating) =>
-    listAnswerRatings({ rating, limit: 120 })
+    listAnswerRatingsWithGrounding({ rating, limit: 120 })
+      .filter((row) => rating !== "up" || isGroundedRating(row))
       .map((row) => ({
         question: row.question,
         answer: String(row.answer || "").slice(0, ratingSignalAnswerMaxChars),

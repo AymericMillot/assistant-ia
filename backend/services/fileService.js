@@ -232,6 +232,35 @@ async function ensureUniqueFilename(folderPath, originalName) {
   return candidate;
 }
 
+// Empreintes deja calculees, par chemin : la synchronisation tourne a chaque
+// affichage de la liste des documents (et en boucle pendant une indexation).
+// Sans ce cache, chaque passage relisait integralement tous les fichiers.
+// Un fichier dont la taille et la date de modification sont inchangees n'est
+// pas relu (meme principe que git ou rsync).
+const fileHashCache = new Map();
+
+async function computeFileMd5Cached(absolutePath, stats) {
+  const cached = fileHashCache.get(absolutePath);
+  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+    return cached.md5Hash;
+  }
+
+  const md5Hash = await computeFileMd5(absolutePath);
+  fileHashCache.set(absolutePath, { size: stats.size, mtimeMs: stats.mtimeMs, md5Hash });
+  return md5Hash;
+}
+
+function isDocumentRowUpToDate(record, expected) {
+  return (
+    record.folder_name === expected.folderName &&
+    record.filename === expected.filename &&
+    record.original_name === expected.originalName &&
+    (record.mime_type || null) === (expected.mimeType || null) &&
+    Number(record.size || 0) === Number(expected.size || 0) &&
+    record.md5_hash === expected.md5Hash
+  );
+}
+
 export async function computeFileMd5(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash("md5");
@@ -300,6 +329,7 @@ function toDocumentDto(row) {
     indexedMd5Hash: row.indexed_md5_hash,
     indexingStatus: row.indexing_status,
     chunkCount: row.chunk_count,
+    visualPageCount: Number(row.visual_page_count || 0),
     lastIndexedAt: row.last_indexed_at,
     lastError: row.last_error,
     createdAt: row.created_at,
@@ -643,6 +673,7 @@ export async function syncFilesystemToDatabase() {
   ensureStorageRoots();
   const folders = await listFolders();
   const seenRelativePaths = new Set();
+  const seenAbsolutePaths = new Set();
   const changedDocuments = [];
 
   for (const folderName of folders) {
@@ -693,21 +724,41 @@ export async function syncFilesystemToDatabase() {
       seenRelativePaths.add(relativePath);
 
       const stats = await fsp.stat(absolutePath);
-      const md5Hash = await computeFileMd5(absolutePath);
+      seenAbsolutePaths.add(absolutePath);
+      const md5Hash = await computeFileMd5Cached(absolutePath, stats);
       const currentRecord =
         getDocumentByRelativePath(relativePath) ||
         existing ||
         getDocuments({ folderName }).find((document) => document.id === existing?.id) ||
         null;
       const hasChanged = !currentRecord || currentRecord.md5_hash !== md5Hash;
+      const originalName = repairDisplayText(currentRecord?.original_name || effectiveFilename);
+      const mimeType = mime.lookup(absolutePath) || "application/octet-stream";
+
+      // Rien n'a bouge : pas d'ecriture (chaque upsert reecrivait toutes les
+      // lignes et leur updated_at a chaque synchronisation).
+      if (
+        !hasChanged &&
+        currentRecord.relative_path === relativePath &&
+        isDocumentRowUpToDate(currentRecord, {
+          folderName,
+          filename: effectiveFilename,
+          originalName,
+          mimeType,
+          size: stats.size,
+          md5Hash
+        })
+      ) {
+        continue;
+      }
 
       const row = upsertDocument({
         folderName,
         filename: effectiveFilename,
-        originalName: repairDisplayText(currentRecord?.original_name || effectiveFilename),
+        originalName,
         relativePath,
         visibility: currentRecord?.visibility || "public",
-        mimeType: mime.lookup(absolutePath) || "application/octet-stream",
+        mimeType,
         size: stats.size,
         md5Hash,
         indexedMd5Hash:
@@ -723,6 +774,12 @@ export async function syncFilesystemToDatabase() {
       if (hasChanged) {
         changedDocuments.push(toDocumentDto(row));
       }
+    }
+  }
+
+  for (const cachedPath of fileHashCache.keys()) {
+    if (!seenAbsolutePaths.has(cachedPath)) {
+      fileHashCache.delete(cachedPath);
     }
   }
 

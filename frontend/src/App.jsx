@@ -1,10 +1,64 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import AccessGate from "./pages/AccessGate";
-import ModelAdminPage from "./pages/ModelAdminPage";
-import ReleaseNotesPage from "./pages/ReleaseNotesPage";
 import UserChat from "./pages/UserChat";
+
+const chunkReloadKey = "assistant-ia-chunk-reload";
+
+function readChunkReloadFlag() {
+  try {
+    return window.sessionStorage.getItem(chunkReloadKey) === "1";
+  } catch {
+    return true;
+  }
+}
+
+function writeChunkReloadFlag(value) {
+  try {
+    if (value) {
+      window.sessionStorage.setItem(chunkReloadKey, "1");
+    } else {
+      window.sessionStorage.removeItem(chunkReloadKey);
+    }
+  } catch {
+    // Sans stockage de session, pas de rechargement automatique (evite une boucle).
+  }
+}
+
+// Apres une mise a jour, un onglet reste ouvert reclame des fichiers JS dont le
+// nom (hache) n'existe plus : on recharge la page une seule fois pour recuperer
+// la nouvelle version au lieu d'afficher une erreur.
+function lazyPage(loader) {
+  return lazy(() =>
+    loader()
+      .then((module) => {
+        writeChunkReloadFlag(false);
+        return module;
+      })
+      .catch((error) => {
+        if (!readChunkReloadFlag()) {
+          writeChunkReloadFlag(true);
+          window.location.reload();
+          return new Promise(() => {});
+        }
+        throw error;
+      })
+  );
+}
+
+// L'administration et les notes de version sont chargees a la demande : le
+// chat public (page la plus visitee) ne telecharge plus leur code.
+const ModelAdminPage = lazyPage(() => import("./pages/ModelAdminPage"));
+const ReleaseNotesPage = lazyPage(() => import("./pages/ReleaseNotesPage"));
+
+function PageLoading() {
+  return (
+    <div className="panel px-6 py-8 text-center text-sm text-slate-500" role="status">
+      Chargement...
+    </div>
+  );
+}
 import { fetchJson } from "./lib/api";
 import { reportError } from "./lib/errors";
 
@@ -144,19 +198,21 @@ function AppGate({ children }) {
 export default function App() {
   return (
     <Layout>
-      <Routes>
-        <Route path="/" element={<UserChat />} />
-        <Route path="/release" element={<ReleaseNotesPage />} />
-        <Route
-          path="/admin"
-          element={
-            <AppGate>
-              <ModelAdminPage />
-            </AppGate>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<PageLoading />}>
+        <Routes>
+          <Route path="/" element={<UserChat />} />
+          <Route path="/release" element={<ReleaseNotesPage />} />
+          <Route
+            path="/admin"
+            element={
+              <AppGate>
+                <ModelAdminPage />
+              </AppGate>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </Layout>
   );
 }

@@ -18,6 +18,10 @@ import SupportManager from "../components/SupportManager";
 import UpdateManager from "../components/UpdateManager";
 import ModelManager from "./admin/ModelManager";
 import BrandingManager from "./admin/BrandingManager";
+import DashboardManager from "./admin/DashboardManager";
+import SkillManager from "./admin/SkillManager";
+import ChatHomeManager from "./admin/ChatHomeManager";
+import BackupManager from "./admin/BackupManager";
 import { fetchJson } from "../lib/api";
 
 function TabIcon({ name }) {
@@ -33,6 +37,36 @@ function TabIcon({ name }) {
   };
 
   switch (name) {
+    case "tableau-de-bord":
+      return (
+        <svg {...shared}>
+          <rect x="3" y="3" width="7" height="9" rx="1.5" />
+          <rect x="14" y="3" width="7" height="5" rx="1.5" />
+          <rect x="14" y="12" width="7" height="9" rx="1.5" />
+          <rect x="3" y="16" width="7" height="5" rx="1.5" />
+        </svg>
+      );
+    case "skills":
+      return (
+        <svg {...shared}>
+          <path d="m12 3 2.2 5.3L20 9l-4.4 3.8L17 19l-5-3.1L7 19l1.4-6.2L4 9l5.8-.7z" />
+        </svg>
+      );
+    case "accueil-chat":
+      return (
+        <svg {...shared}>
+          <path d="M3 11h3l9-5v12l-9-5H3z" />
+          <path d="M6 13v5a2 2 0 0 0 2 2h1" />
+        </svg>
+      );
+    case "sauvegardes":
+      return (
+        <svg {...shared}>
+          <path d="M5 4h11l3 3v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1z" />
+          <path d="M8 4v5h7V4" />
+          <rect x="8" y="13" width="8" height="5" rx="1" />
+        </svg>
+      );
     case "documents":
       return (
         <svg {...shared}>
@@ -142,26 +176,30 @@ function TabIcon({ name }) {
 }
 
 const baseTabs = [
+  { id: "tableau-de-bord", label: "Tableau de bord" },
   { id: "documents", label: "Documents" },
   { id: "pieces-jointes", label: "Pièces jointes" },
   { id: "recherche", label: "Recherche" },
   { id: "identite", label: "Identité" },
   { id: "personnalisation", label: "Personnalisation" },
+  { id: "skills", label: "Skills" },
+  { id: "accueil-chat", label: "Accueil du chat" },
   { id: "feedback", label: "Feedback" },
   { id: "analytics", label: "Analytics" },
   { id: "modeles", label: "Modèles" },
   { id: "indexation", label: "Indexation" },
   { id: "performance", label: "Performance" },
-  { id: "donnees", label: "Données" },
   { id: "mise-a-jour", label: "Mise à jour" }
 ];
 const elevatedTabs = [
+  { id: "sauvegardes", label: "Sauvegardes" },
+  { id: "donnees", label: "Données" },
   { id: "comptes-admin", label: "Comptes admin" },
   { id: "audit", label: "Audit" },
   { id: "export-deploiement", label: "Export et déploiement" }
 ];
 
-const defaultTabId = "documents";
+const defaultTabId = "tableau-de-bord";
 
 export default function ModelAdminPage() {
   const navigate = useNavigate();
@@ -199,7 +237,7 @@ export default function ModelAdminPage() {
   }, []);
 
   function setActiveTab(tabId) {
-    if (tabId === activeTab) {
+    if (tabId === activeTab || !validTabIds.has(tabId)) {
       return;
     }
 
@@ -287,7 +325,7 @@ export default function ModelAdminPage() {
               Administration
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-[-0.05em] text-slate-950 dark:text-slate-50">
-              Documents, personnalisation et modèle
+              Pilotage de l&apos;assistant
             </h1>
           </div>
 
@@ -342,18 +380,24 @@ export default function ModelAdminPage() {
         </div>
       </section>
 
+      {activeTab === "tableau-de-bord" && (
+        <DashboardManager onNavigate={setActiveTab} updateAvailable={updateAvailable} availableTabs={validTabIds} />
+      )}
       {activeTab === "documents" && <DocumentManager onRefreshSummary={() => {}} />}
       {activeTab === "pieces-jointes" && <AttachmentManager />}
       {activeTab === "recherche" && <SearchManager />}
       {activeTab === "identite" && <BrandingManager />}
       {activeTab === "personnalisation" && <ManualResourceManager />}
+      {activeTab === "skills" && <SkillManager />}
+      {activeTab === "accueil-chat" && <ChatHomeManager />}
       {activeTab === "feedback" && <FeedbackManager />}
       {activeTab === "analytics" && <AnalyticsManager />}
       {activeTab === "modeles" && <ModelManager onRefreshSummary={() => {}} />}
       {activeTab === "indexation" && <IndexManager onRefreshSummary={() => {}} />}
       {activeTab === "performance" && <PerformanceManager />}
-      {activeTab === "donnees" && <DataManager />}
+      {activeTab === "donnees" && hasElevatedAccess && <DataManager />}
       {activeTab === "mise-a-jour" && <UpdateManager />}
+      {activeTab === "sauvegardes" && hasElevatedAccess && <BackupManager />}
       {activeTab === "comptes-admin" && hasElevatedAccess && <AdminUsersManager />}
       {activeTab === "audit" && hasElevatedAccess && <AuditLogManager />}
       {activeTab === "export-deploiement" && hasElevatedAccess && <DeploymentManager />}

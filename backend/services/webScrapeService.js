@@ -30,17 +30,25 @@ function isPrivateIpAddress(address) {
   const normalized = String(address || "").replace(/^::ffff:/i, "");
 
   if (net.isIPv4(normalized)) {
+    const [first, second] = normalized.split(".").map(Number);
     return (
       /^(10\.|127\.|0\.|169\.254\.|192\.168\.)/.test(normalized) ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(normalized)
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(normalized) ||
+      // Partage d'adresses operateur (100.64/10), bancs de test (198.18/15),
+      // multidiffusion et plages reservees (224 et au-dela).
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      first >= 224
     );
   }
 
   if (net.isIPv6(normalized)) {
     return (
       normalized === "::1" ||
+      normalized === "::" ||
       /^f[cd]/i.test(normalized) ||
-      /^fe80/i.test(normalized)
+      /^fe[89ab]/i.test(normalized) ||
+      /^ff/i.test(normalized)
     );
   }
 
@@ -63,7 +71,8 @@ async function assertPublicHttpUrl(rawUrl) {
     return parsed;
   }
 
-  const hostname = parsed.hostname.toLowerCase();
+  // Les adresses IPv6 litterales sont entre crochets dans une URL ([::1]).
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (
     hostname === "localhost" ||
     hostname.endsWith(".local") ||
@@ -163,45 +172,72 @@ export function extractReadableText(html, { baseUrl = "" } = {}) {
   };
 }
 
+const maxRedirects = 5;
+
 export async function fetchPageText(rawUrl) {
-  const parsedUrl = await assertPublicHttpUrl(rawUrl);
+  let parsedUrl = await assertPublicHttpUrl(rawUrl);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(new Error("timeout")), scrapeTimeoutMs);
 
   let response;
   try {
-    response = await fetch(parsedUrl.toString(), {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": scrapeUserAgent,
-        Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"
+    // Redirections suivies a la main : chaque etape est validee AVANT d'etre
+    // contactee. Avec redirect: "follow", une page publique pouvait faire
+    // envoyer une requete vers un service interne (Redis, Ollama, updater...)
+    // avant toute verification.
+    for (let redirectCount = 0; ; redirectCount += 1) {
+      response = await fetch(parsedUrl.toString(), {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": scrapeUserAgent,
+          Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"
+        }
+      });
+
+      const location = response.headers.get("location");
+      if (response.status < 300 || response.status >= 400 || !location) {
+        break;
       }
-    });
+
+      await response.body?.cancel?.().catch(() => undefined);
+      if (redirectCount >= maxRedirects) {
+        throw scrapeError("Le lien redirige trop de fois.");
+      }
+
+      parsedUrl = await assertPublicHttpUrl(new URL(location, parsedUrl).toString());
+    }
   } catch (error) {
+    clearTimeout(timeoutId);
+    if (error?.statusCode) {
+      throw error;
+    }
     if (error?.name === "AbortError") {
       throw scrapeError("Le site du lien met trop de temps à répondre.");
     }
     throw scrapeError("Impossible de joindre le site du lien.");
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  // Les redirections peuvent renvoyer vers une adresse interne : on revalide l'URL finale.
-  if (response.url && response.url !== parsedUrl.toString()) {
-    await assertPublicHttpUrl(response.url);
   }
 
   if (!response.ok) {
+    clearTimeout(timeoutId);
     throw scrapeError(`Le site du lien a répondu avec une erreur (${response.status}).`);
   }
 
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
   if (contentType && !/text\/html|application\/xhtml|text\/plain/.test(contentType)) {
+    clearTimeout(timeoutId);
     throw scrapeError("Ce lien ne pointe pas vers une page texte lisible (HTML ou texte).");
   }
 
-  const body = await readBodyWithLimit(response);
+  // Le delai maximal couvre aussi la lecture du contenu (serveur tres lent).
+  let body;
+  try {
+    body = await readBodyWithLimit(response);
+  } catch {
+    throw scrapeError("Le site du lien met trop de temps à répondre.");
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (/text\/plain/.test(contentType)) {
     return {

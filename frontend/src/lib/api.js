@@ -101,6 +101,12 @@ export async function fetchJson(url, options = {}) {
     } catch (error) {
       lastError = error;
 
+      // Annulation voulue par l'appelant (page quittee, nouvelle saisie) : ni
+      // nouvel essai ni faux message "serveur sollicite".
+      if (signal?.aborted) {
+        throw error;
+      }
+
       if (attempt < retryCount && isNetworkLikeError(error)) {
         await sleep(retryDelayMs * (attempt + 1));
         continue;

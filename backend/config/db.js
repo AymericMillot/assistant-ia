@@ -17,7 +17,8 @@ const allowedDocumentUpdateColumns = new Set([
   "indexing_status",
   "chunk_count",
   "last_indexed_at",
-  "last_error"
+  "last_error",
+  "visual_page_count"
 ]);
 const allowedManualResourceUpdateColumns = new Set([
   "title",
@@ -49,6 +50,29 @@ const defaultSettings = {
   lastIndexedDocumentsCount: "0"
 };
 
+// Les requetes sont preparees a la volee partout (getDb().prepare(sql)) : le
+// cache reutilise la requete compilee au lieu de reanalyser le SQL a chaque
+// appel (getSetting est appele plusieurs fois par question). Cache propre a
+// chaque connexion, donc vide a la reouverture apres une restauration.
+const maxCachedStatements = 512;
+
+function enableStatementCache(database) {
+  const prepareUncached = database.prepare.bind(database);
+  const statements = new Map();
+
+  database.prepare = (sql) => {
+    let statement = statements.get(sql);
+    if (!statement) {
+      statement = prepareUncached(sql);
+      if (statements.size >= maxCachedStatements) {
+        statements.delete(statements.keys().next().value);
+      }
+      statements.set(sql, statement);
+    }
+    return statement;
+  };
+}
+
 export function initializeDatabase() {
   if (dbInstance) {
     return dbInstance;
@@ -60,6 +84,13 @@ export function initializeDatabase() {
   dbInstance = new Database(sqlitePath);
   dbInstance.pragma("journal_mode = WAL");
   dbInstance.pragma("foreign_keys = ON");
+  // En WAL, NORMAL reste sur (pas de corruption possible) et evite un fsync a
+  // chaque ecriture ; busy_timeout laisse les scripts annexes (reinitialisation
+  // de mot de passe, sauvegarde) attendre le verrou au lieu d'echouer en SQLITE_BUSY.
+  dbInstance.pragma("synchronous = NORMAL");
+  dbInstance.pragma(`busy_timeout = ${Math.max(0, Number(process.env.SQLITE_BUSY_TIMEOUT_MS || 5000))}`);
+  dbInstance.pragma("temp_store = MEMORY");
+  enableStatementCache(dbInstance);
 
   dbInstance.exec(`
     CREATE TABLE IF NOT EXISTS admin_users (
@@ -283,6 +314,60 @@ export function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_retrieval_score_logs_created_at
     ON retrieval_score_logs(created_at DESC, id DESC);
+
+    -- Skills : methodes de reponse predefinies (procedure, diagnostic, format...)
+    -- deposees par l'administration et injectees dans le prompt quand elles
+    -- correspondent a la question (activation "auto"), toujours ("always") ou
+    -- seulement sur choix explicite de l'utilisateur ("manual").
+    CREATE TABLE IF NOT EXISTS skills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      instructions TEXT NOT NULL,
+      triggers TEXT NOT NULL DEFAULT '',
+      activation TEXT NOT NULL DEFAULT 'auto',
+      user_selectable INTEGER NOT NULL DEFAULT 1,
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      source TEXT NOT NULL DEFAULT 'manual',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Questions sans reponse documentaire deja traitees par un referent
+    -- (ressource creee ou question ecartee) : masquees des analytics.
+    CREATE TABLE IF NOT EXISTS analytics_dismissed_questions (
+      exchange_id INTEGER PRIMARY KEY,
+      reason TEXT NOT NULL DEFAULT 'dismissed',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Descriptions produites par le modele de vision pour les pages illustrees
+    -- des PDF. Cle = contenu du fichier + modele + page + version du prompt :
+    -- une reindexation (changement de modele d'embedding, reindexation
+    -- complete) reutilise les descriptions au lieu de relancer la vision.
+    CREATE TABLE IF NOT EXISTS document_visual_descriptions (
+      file_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      page_number INTEGER NOT NULL,
+      prompt_version TEXT NOT NULL,
+      description TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (file_hash, model, page_number, prompt_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_conversation_exchanges_created_at
+    ON conversation_exchanges(created_at DESC, id DESC);
+
+    -- Estimation du temps de reponse (a chaque frappe dans le chat) : derniers
+    -- echantillons tous modeles confondus ou pour un modele, sans tri complet.
+    CREATE INDEX IF NOT EXISTS idx_chat_metrics_created_at
+    ON chat_metrics(created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_chat_metrics_model_created_at
+    ON chat_metrics(model_name, created_at DESC, id DESC);
   `);
 
   const documentColumns = dbInstance.prepare("PRAGMA table_info(documents)").all();
@@ -291,6 +376,10 @@ export function initializeDatabase() {
     dbInstance.exec(
       "ALTER TABLE documents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'"
     );
+  }
+  // Nombre de pages dont le contenu visuel a ete decrit par le modele de vision.
+  if (!documentColumns.some((column) => column.name === "visual_page_count")) {
+    dbInstance.exec("ALTER TABLE documents ADD COLUMN visual_page_count INTEGER NOT NULL DEFAULT 0");
   }
 
   const insertSetting = dbInstance.prepare(`
@@ -418,6 +507,28 @@ export function getDb() {
   }
 
   return dbInstance;
+}
+
+export function getSqlitePath() {
+  return resolveRuntimePath(process.env.SQLITE_PATH || "./data/assistant-ia.sqlite");
+}
+
+/**
+ * Ferme la connexion SQLite (restauration d'une sauvegarde) : le prochain
+ * getDb() rouvre la base et rejoue les migrations idempotentes.
+ */
+export function closeDatabase() {
+  if (!dbInstance) {
+    return;
+  }
+
+  try {
+    dbInstance.pragma("wal_checkpoint(TRUNCATE)");
+  } catch {
+    // Base deja inutilisable : la fermeture suffit.
+  }
+  dbInstance.close();
+  dbInstance = undefined;
 }
 
 export function getSetting(key, fallbackValue = null) {
@@ -679,7 +790,9 @@ export function updateDocumentIndexing({
     chunk_count: chunkCount,
     indexed_md5_hash: indexedMd5Hash,
     last_error: lastError,
-    last_indexed_at: lastIndexedAt
+    last_indexed_at: lastIndexedAt,
+    // Fixe par indexDocument apres un succes ; remis a zero sinon.
+    ...(indexingStatus === "indexed" ? {} : { visual_page_count: 0 })
   });
 }
 
@@ -1280,6 +1393,23 @@ export function listAnswerRatings({ rating = null, limit = 50 } = {}) {
     .all(parameters);
 }
 
+// Evaluations accompagnees du fondement de la reponse evaluee (documents,
+// personnalisations ou connaissances generales du modele).
+export function listAnswerRatingsWithGrounding({ rating, limit = 120 } = {}) {
+  return getDb()
+    .prepare(
+      `
+      SELECT ar.*, ce.retrieval_metadata
+      FROM answer_ratings ar
+      LEFT JOIN conversation_exchanges ce ON ce.id = ar.exchange_id
+      WHERE ar.rating = @rating
+      ORDER BY ar.created_at DESC, ar.id DESC
+      LIMIT @limit
+    `
+    )
+    .all({ rating, limit: Math.max(1, Math.min(Number(limit) || 120, 500)) });
+}
+
 export function getAnswerRatingStats() {
   const row = getDb()
     .prepare(
@@ -1379,6 +1509,29 @@ export function insertRetrievalScoreLog({
     });
 }
 
+/**
+ * Une ligne est journalisee a chaque question et l'administration n'en lit
+ * jamais plus de 2000 : au-dela, la table ne ferait que grossir indefiniment.
+ */
+export function pruneRetrievalScoreLogs({ keep = 5000 } = {}) {
+  const safeKeep = Math.max(2000, Number(keep) || 5000);
+  return getDb()
+    .prepare(
+      `
+      DELETE FROM retrieval_score_logs
+      WHERE id <= (
+        SELECT id FROM retrieval_score_logs ORDER BY id DESC LIMIT 1 OFFSET @keep
+      )
+    `
+    )
+    .run({ keep: safeKeep }).changes;
+}
+
+/** Entretien periodique : statistiques du planificateur de requetes a jour. */
+export function optimizeDatabase() {
+  getDb().pragma("optimize");
+}
+
 export function getRetrievalScoreSummary({ limit = 500 } = {}) {
   const rows = getDb()
     .prepare(
@@ -1434,7 +1587,8 @@ export function updateConversationExchangeRetrievalMetadata(exchangeId, retrieva
     .run(retrievalMetadata ? JSON.stringify(retrievalMetadata) : null, exchangeId);
 }
 
-export function getTopQuestions({ limit = 20 } = {}) {
+export function getTopQuestions({ limit = 20, sinceDays = null } = {}) {
+  const sinceClause = sinceDays ? "WHERE created_at >= datetime('now', @since)" : "";
   const rows = getDb()
     .prepare(
       `
@@ -1442,50 +1596,308 @@ export function getTopQuestions({ limit = 20 } = {}) {
         LOWER(TRIM(question)) AS normalized_question,
         question,
         COUNT(*) AS occurrences,
+        COUNT(DISTINCT conversation_id) AS conversation_count,
         MAX(created_at) AS last_asked_at
       FROM conversation_exchanges
+      ${sinceClause}
       GROUP BY LOWER(TRIM(question))
       ORDER BY occurrences DESC, last_asked_at DESC
       LIMIT @limit
     `
     )
-    .all({ limit: Math.max(1, Math.min(Number(limit) || 20, 100)) });
+    .all({
+      limit: Math.max(1, Math.min(Number(limit) || 20, 1000)),
+      ...(sinceDays ? { since: `-${Math.max(1, Number(sinceDays) || 1)} days` } : {})
+    });
 
   return rows.map((row) => ({
     question: row.question,
     occurrences: Number(row.occurrences),
+    conversationCount: Number(row.conversation_count),
     lastAskedAt: row.last_asked_at
   }));
 }
 
-export function getUnansweredQuestions({ limit = 20 } = {}) {
+// Une question est "sans reponse" quand rien d'interne ne l'a fondee : ni
+// document retenu, ni personnalisation pertinente, ni correction validee.
+// (Auparavant, toute reponse sans document fort etait comptee, y compris
+// celles entierement fondees sur une personnalisation.)
+function isUnansweredRetrievalMetadata(rawMetadata) {
+  try {
+    const metadata = JSON.parse(rawMetadata || "{}");
+    if (metadata.groundingMode && metadata.groundingMode !== "general") {
+      return false;
+    }
+
+    return (
+      !metadata.hasStrongDocumentContext &&
+      (metadata.manualResourcesUsed || []).length === 0 &&
+      (metadata.improvementRulesUsed || []).length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function getUnansweredQuestions({ limit = 20, sinceDays = null } = {}) {
+  const sinceClause = sinceDays
+    ? "AND ce.created_at >= datetime('now', @since)"
+    : "";
   const rows = getDb()
     .prepare(
       `
-      SELECT id, conversation_id, question, answer, created_at, retrieval_metadata
-      FROM conversation_exchanges
-      WHERE retrieval_metadata IS NOT NULL
-      ORDER BY created_at DESC, id DESC
-      LIMIT 500
+      SELECT ce.id, ce.conversation_id, ce.question, ce.answer, ce.created_at, ce.retrieval_metadata
+      FROM conversation_exchanges ce
+      LEFT JOIN analytics_dismissed_questions dismissed ON dismissed.exchange_id = ce.id
+      WHERE ce.retrieval_metadata IS NOT NULL
+        AND dismissed.exchange_id IS NULL
+        ${sinceClause}
+      ORDER BY ce.created_at DESC, ce.id DESC
+      LIMIT 1000
     `
     )
-    .all();
+    .all(sinceDays ? { since: `-${Math.max(1, Number(sinceDays) || 1)} days` } : {});
 
-  const unanswered = rows.filter((row) => {
-    try {
-      const metadata = JSON.parse(row.retrieval_metadata || "{}");
-      return metadata.groundingMode === "general" || metadata.hasStrongDocumentContext === false;
-    } catch {
-      return false;
-    }
-  });
+  const unanswered = rows.filter((row) => isUnansweredRetrievalMetadata(row.retrieval_metadata));
 
-  return unanswered.slice(0, Math.max(1, Math.min(Number(limit) || 20, 100))).map((row) => ({
+  return unanswered.slice(0, Math.max(1, Math.min(Number(limit) || 20, 1000))).map((row) => ({
     id: row.id,
     conversationId: row.conversation_id,
     question: row.question,
+    answer: row.answer,
     createdAt: row.created_at
   }));
+}
+
+export function dismissUnansweredQuestion(exchangeId, reason = "dismissed") {
+  getDb()
+    .prepare(
+      `
+      INSERT INTO analytics_dismissed_questions (exchange_id, reason)
+      VALUES (?, ?)
+      ON CONFLICT(exchange_id) DO UPDATE SET reason = excluded.reason
+    `
+    )
+    .run(exchangeId, reason);
+}
+
+export function getConversationExchangeById(id) {
+  return getDb().prepare("SELECT * FROM conversation_exchanges WHERE id = ?").get(id);
+}
+
+// --- Skills ------------------------------------------------------------------
+
+function mapSkillRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    description: row.description || "",
+    instructions: row.instructions || "",
+    triggers: String(row.triggers || "")
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    activation: row.activation,
+    userSelectable: Boolean(row.user_selectable),
+    isEnabled: Boolean(row.is_enabled),
+    source: row.source,
+    usageCount: Number(row.usage_count || 0),
+    lastUsedAt: row.last_used_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export function listSkills({ enabledOnly = false } = {}) {
+  return getDb()
+    .prepare(
+      `SELECT * FROM skills ${enabledOnly ? "WHERE is_enabled = 1" : ""} ORDER BY title COLLATE NOCASE ASC, id ASC`
+    )
+    .all()
+    .map(mapSkillRow);
+}
+
+export function getSkillById(id) {
+  return mapSkillRow(getDb().prepare("SELECT * FROM skills WHERE id = ?").get(id));
+}
+
+export function getSkillBySlug(slug) {
+  return mapSkillRow(getDb().prepare("SELECT * FROM skills WHERE slug = ?").get(slug));
+}
+
+function toSkillColumns(skill) {
+  return {
+    slug: skill.slug,
+    title: skill.title,
+    description: skill.description || "",
+    instructions: skill.instructions,
+    triggers: (skill.triggers || []).join("\n"),
+    activation: skill.activation || "auto",
+    user_selectable: skill.userSelectable === false ? 0 : 1,
+    is_enabled: skill.isEnabled === false ? 0 : 1,
+    source: skill.source || "manual"
+  };
+}
+
+export function createSkill(skill) {
+  const result = getDb()
+    .prepare(
+      `
+      INSERT INTO skills (slug, title, description, instructions, triggers, activation, user_selectable, is_enabled, source)
+      VALUES (@slug, @title, @description, @instructions, @triggers, @activation, @user_selectable, @is_enabled, @source)
+    `
+    )
+    .run(toSkillColumns(skill));
+
+  return getSkillById(result.lastInsertRowid);
+}
+
+export function updateSkill(id, skill) {
+  getDb()
+    .prepare(
+      `
+      UPDATE skills
+      SET slug = @slug,
+          title = @title,
+          description = @description,
+          instructions = @instructions,
+          triggers = @triggers,
+          activation = @activation,
+          user_selectable = @user_selectable,
+          is_enabled = @is_enabled,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `
+    )
+    .run({ ...toSkillColumns(skill), id });
+
+  return getSkillById(id);
+}
+
+export function deleteSkill(id) {
+  return getDb().prepare("DELETE FROM skills WHERE id = ?").run(id);
+}
+
+export function recordSkillUsage(ids = []) {
+  const statement = getDb().prepare(
+    "UPDATE skills SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE id = ?"
+  );
+  ids.forEach((id) => statement.run(id));
+}
+
+// --- Tableau de bord et exports ---------------------------------------------------
+
+export function getActivityOverview({ days = 14 } = {}) {
+  const db = getDb();
+  const safeDays = Math.max(1, Math.min(Number(days) || 14, 90));
+  const perDay = db
+    .prepare(
+      `
+      SELECT DATE(created_at, 'localtime') AS day, COUNT(*) AS count
+      FROM conversation_exchanges
+      WHERE created_at >= datetime('now', @since)
+      GROUP BY DATE(created_at, 'localtime')
+      ORDER BY day ASC
+    `
+    )
+    .all({ since: `-${safeDays} days` });
+
+  const counts = db
+    .prepare(
+      `
+      SELECT
+        SUM(CASE WHEN DATE(created_at, 'localtime') = DATE('now', 'localtime') THEN 1 ELSE 0 END) AS today,
+        SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS week,
+        COUNT(DISTINCT CASE WHEN created_at >= datetime('now', '-7 days') THEN conversation_id END) AS weekConversations
+      FROM conversation_exchanges
+    `
+    )
+    .get();
+
+  const ratings = db
+    .prepare(
+      `
+      SELECT
+        SUM(CASE WHEN rating = 'up' THEN 1 ELSE 0 END) AS up,
+        SUM(CASE WHEN rating = 'down' THEN 1 ELSE 0 END) AS down
+      FROM answer_ratings
+      WHERE created_at >= datetime('now', '-7 days')
+    `
+    )
+    .get();
+
+  const pendingFeedback =
+    db
+      .prepare("SELECT COUNT(*) AS count FROM feedback WHERE is_deleted = 0 AND feedback_status = 'pending'")
+      .get()?.count || 0;
+  const pendingAttachments =
+    db.prepare("SELECT COUNT(*) AS count FROM user_attachments WHERE status = 'pending'").get()?.count || 0;
+
+  return {
+    perDay: perDay.map((row) => ({ day: row.day, count: Number(row.count) })),
+    questionsToday: Number(counts?.today || 0),
+    questionsWeek: Number(counts?.week || 0),
+    conversationsWeek: Number(counts?.weekConversations || 0),
+    ratingsWeek: { up: Number(ratings?.up || 0), down: Number(ratings?.down || 0) },
+    pendingFeedback: Number(pendingFeedback),
+    pendingAttachments: Number(pendingAttachments)
+  };
+}
+
+export function listExchangesForExport({ sinceDays = 90 } = {}) {
+  return getDb()
+    .prepare(
+      `
+      SELECT
+        ce.id,
+        ce.conversation_id,
+        ce.created_at,
+        ce.question,
+        ce.answer,
+        ce.retrieval_metadata,
+        (SELECT rating FROM answer_ratings ar WHERE ar.exchange_id = ce.id ORDER BY ar.updated_at DESC LIMIT 1) AS rating
+      FROM conversation_exchanges ce
+      WHERE ce.created_at >= datetime('now', @since)
+      ORDER BY ce.created_at DESC, ce.id DESC
+      LIMIT 20000
+    `
+    )
+    .all({ since: `-${Math.max(1, Math.min(Number(sinceDays) || 90, 3650))} days` });
+}
+
+export function listAuditLogForExport({ limit = 20000 } = {}) {
+  return getDb()
+    .prepare("SELECT * FROM audit_log ORDER BY created_at DESC, id DESC LIMIT ?")
+    .all(Math.max(1, Math.min(Number(limit) || 20000, 50000)));
+}
+
+export function listFeedbackForExport() {
+  return getDb()
+    .prepare(
+      `
+      SELECT f.id, f.created_at, f.updated_at, f.feedback_status, f.instructions, f.corrected_response,
+             ce.question AS question, ce.answer AS original_answer
+      FROM feedback f
+      LEFT JOIN conversation_exchanges ce ON ce.id = f.exchange_id
+      WHERE f.is_deleted = 0
+      ORDER BY f.created_at DESC, f.id DESC
+      LIMIT 20000
+    `
+    )
+    .all();
+}
+
+export function listRatingsForExport() {
+  return getDb()
+    .prepare(
+      "SELECT id, created_at, updated_at, rating, question, answer FROM answer_ratings ORDER BY created_at DESC, id DESC LIMIT 20000"
+    )
+    .all();
 }
 
 export function purgeAllProjectData() {
@@ -1511,6 +1923,7 @@ export function purgeConversationFeedbackData() {
   db.prepare("DELETE FROM improvement_rules").run();
   db.prepare("DELETE FROM feedback").run();
   db.prepare("DELETE FROM answer_ratings").run();
+  db.prepare("DELETE FROM analytics_dismissed_questions").run();
   db.prepare("DELETE FROM conversation_exchanges").run();
   db.prepare("DELETE FROM messages").run();
   db.prepare("DELETE FROM conversations").run();
@@ -1621,4 +2034,41 @@ function backfillFeedbackExchangeIds() {
       });
     }
   });
+}
+
+export function getVisualDescription({ fileHash, model, pageNumber, promptVersion }) {
+  const row = getDb()
+    .prepare(
+      `SELECT description FROM document_visual_descriptions
+       WHERE file_hash = ? AND model = ? AND page_number = ? AND prompt_version = ?`
+    )
+    .get(fileHash, model, pageNumber, promptVersion);
+  return row ? row.description : null;
+}
+
+export function saveVisualDescription({ fileHash, model, pageNumber, promptVersion, description }) {
+  getDb()
+    .prepare(
+      `INSERT INTO document_visual_descriptions (file_hash, model, page_number, prompt_version, description)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(file_hash, model, page_number, prompt_version)
+       DO UPDATE SET description = excluded.description, created_at = CURRENT_TIMESTAMP`
+    )
+    .run(fileHash, model, pageNumber, promptVersion, description);
+}
+
+// Descriptions de fichiers qui ne sont plus dans la bibliotheque (supprimes ou
+// remplaces), au-dela d'un delai de grace pour ne pas gener une indexation en cours.
+export function pruneVisualDescriptions({ olderThanDays = 7 } = {}) {
+  return getDb()
+    .prepare(
+      `DELETE FROM document_visual_descriptions
+       WHERE created_at < datetime('now', ?)
+         AND file_hash NOT IN (SELECT md5_hash FROM documents WHERE md5_hash IS NOT NULL)`
+    )
+    .run(`-${Math.max(1, Number(olderThanDays) || 7)} days`).changes;
+}
+
+export function setDocumentVisualPageCount(documentId, count) {
+  updateDocumentRow(documentId, { visual_page_count: Math.max(0, Number(count) || 0) });
 }

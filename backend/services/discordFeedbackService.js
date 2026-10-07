@@ -26,6 +26,7 @@ export async function sendFeedbackToDiscord({ type, message, contact, req }) {
   if (!webhookUrl) {
     const error = new Error("Ce canal de signalement n'est pas configuré.");
     error.statusCode = 503;
+    error.expose = true;
     throw error;
   }
 
@@ -63,6 +64,9 @@ export async function sendFeedbackToDiscord({ type, message, contact, req }) {
   );
 
   const payload = {
+    // Aucune mention (@everyone, @here, roles) ne doit pouvoir etre declenchee
+    // par le texte d'un visiteur anonyme.
+    allowed_mentions: { parse: [] },
     embeds: [
       {
         title: EMBED_TITLE[type],
@@ -87,8 +91,9 @@ export async function sendFeedbackToDiscord({ type, message, contact, req }) {
       body: bodyText.slice(0, 500)
     });
 
-    const error = new Error("Echec de l'envoi du signalement. Reessayez plus tard.");
+    const error = new Error("Échec de l'envoi du signalement. Réessayez plus tard.");
     error.statusCode = 502;
+    error.expose = true;
     throw error;
   }
 }

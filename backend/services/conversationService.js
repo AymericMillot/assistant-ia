@@ -76,18 +76,19 @@ function mapExchangeRow(row) {
 }
 
 export function buildAnonymousUserId(req) {
-  const ip =
-    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-    req.socket?.remoteAddress ||
-    "unknown-ip";
+  // req.ip ne tient compte de X-Forwarded-For que si TRUST_PROXY est active :
+  // l'en-tete brut, librement falsifiable, n'est plus lu directement.
+  const ip = req.ip || req.socket?.remoteAddress || "unknown-ip";
   const userAgent = req.headers["user-agent"] || "unknown-agent";
   const hash = crypto.createHash("sha256").update(`${ip}|${userAgent}`).digest("hex");
   return `anon-${hash.slice(0, 24)}`;
 }
 
 export function resolveConversationSessionId(value) {
+  // Meme format que les identifiants generes par le navigateur : une valeur
+  // inattendue (trop longue, caracteres speciaux) ouvre une nouvelle session.
   const safeValue = String(value || "").trim();
-  return safeValue || crypto.randomUUID();
+  return /^[a-zA-Z0-9-]{8,100}$/.test(safeValue) ? safeValue : crypto.randomUUID();
 }
 
 export function getConversationBySessionId(sessionId) {

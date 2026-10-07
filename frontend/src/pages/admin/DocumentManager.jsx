@@ -294,21 +294,22 @@ export default function DocumentManager({ onRefreshSummary }) {
       withCredentials: true
     });
 
+    // Pendant une indexation, la progression arrive plusieurs fois par seconde :
+    // un seul rechargement de la liste au plus toutes les 1,5 s (le dernier etat
+    // est toujours recharge), au lieu d'une requete complete par evenement.
     const scheduleRealtimeRefresh = () => {
       if (realtimeRefreshTimeoutRef.current) {
-        window.clearTimeout(realtimeRefreshTimeoutRef.current);
+        return;
       }
 
       realtimeRefreshTimeoutRef.current = window.setTimeout(() => {
-        loadDocuments({ silent: true });
         realtimeRefreshTimeoutRef.current = null;
-      }, 250);
+        loadDocuments({ silent: true });
+        onRefreshSummary();
+      }, 1500);
     };
 
-    socket.on("indexing:progress", () => {
-      scheduleRealtimeRefresh();
-      onRefreshSummary();
-    });
+    socket.on("indexing:progress", scheduleRealtimeRefresh);
 
     return () => {
       if (realtimeRefreshTimeoutRef.current) {
@@ -898,7 +899,10 @@ export default function DocumentManager({ onRefreshSummary }) {
               <div className="mt-4 space-y-3">
                 <p className="text-sm text-slate-500 dark:text-slate-400">
                   {chunkPreview.data.totalChunks} extrait(s) au total
-                  {chunkPreview.data.truncated ? " (aperçu limité aux 40 premiers)" : ""}.
+                  {chunkPreview.data.visualChunks > 0
+                    ? `, dont ${chunkPreview.data.visualChunks} issu(s) de l'analyse des images`
+                    : ""}
+                  {chunkPreview.data.truncated ? " (aperçu limité)" : ""}.
                 </p>
                 {chunkPreview.data.chunks.map((chunk) => (
                   <article
@@ -907,6 +911,7 @@ export default function DocumentManager({ onRefreshSummary }) {
                   >
                     <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
                       Extrait {chunk.index + 1} · {chunk.charCount} caractères
+                      {chunk.kind === "visual" ? ` · Image, page ${chunk.pageNumber}` : ""}
                     </p>
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700 dark:text-slate-300">
                       {chunk.content}
@@ -1302,6 +1307,11 @@ export default function DocumentManager({ onRefreshSummary }) {
                               <p className="mt-2 text-base font-semibold text-slate-900 dark:text-slate-100">
                                 {document.chunkCount}
                               </p>
+                              {document.visualPageCount > 0 ? (
+                                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                  dont images décrites sur {document.visualPageCount} page(s)
+                                </p>
+                              ) : null}
                             </div>
                             <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900">
                               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">

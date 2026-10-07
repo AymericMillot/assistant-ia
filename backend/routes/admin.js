@@ -98,6 +98,8 @@ import {
   scrapeAndIndexLinkResource
 } from "../services/webScrapeService.js";
 import { markActivity } from "../services/schedulerService.js";
+import adminFeaturesRouter from "./adminFeatures.js";
+import { isTeacherPasswordChangeRequired } from "../services/accessPasswordService.js";
 import {
   createRateLimiter,
   ensureSafeFolderName,
@@ -128,7 +130,9 @@ function logAudit(req, action, { targetType = null, targetId = null, details = n
       action,
       targetType,
       targetId,
-      details
+      // L'identifiant du compte nomme permet de savoir QUI a agi, pas seulement
+      // avec quel role (plusieurs comptes peuvent partager un role).
+      details: { ...(details || {}), actor: req.user?.identifiant || req.user?.role || null }
     });
   } catch (error) {
     // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
@@ -155,6 +159,23 @@ function parseOptionalBoolean(value) {
 }
 
 router.use(authMiddleware);
+// Mot de passe referent genere a l'installation : tant qu'il n'a pas ete
+// change, l'administration reste fermee (l'interface l'imposait deja, mais
+// l'API restait accessible directement).
+router.use((req, res, next) => {
+  if (
+    req.user?.role === "referent" &&
+    req.user?.adminUserId === "temporary-admin" &&
+    isTeacherPasswordChangeRequired()
+  ) {
+    return res.status(403).json({
+      message: "Changez d'abord le mot de passe référent généré à l'installation.",
+      code: "PASSWORD_CHANGE_REQUIRED"
+    });
+  }
+
+  return next();
+});
 router.use((req, res, next) => {
   if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
     return adminMutationRateLimiter(req, res, next);
@@ -162,6 +183,8 @@ router.use((req, res, next) => {
 
   return next();
 });
+// Tableau de bord, skills, sauvegardes, exports CSV et accueil du chat.
+router.use(adminFeaturesRouter);
 
 router.get("/summary", async (_req, res, next) => {
   try {
@@ -1419,10 +1442,16 @@ router.get("/models", async (_req, res) => {
     // dans l'admin pour que chaque modele indique sa capacite exacte plutot qu'une valeur generique.
     const withContextLength = async (list) =>
       Promise.all(
-        list.map(async (model) => ({
-          ...model,
-          contextLength: await ollamaService.getModelContextLength(model.name)
-        }))
+        list.map(async (model) => {
+          const profile = await ollamaService.getModelProfile(model.name);
+          return {
+            ...model,
+            contextLength: profile?.maxContext ?? null,
+            // Fenetre reellement demandee a Ollama (bornee par la memoire et OLLAMA_NUM_CTX).
+            effectiveContextLength: profile?.unavailable ? null : profile?.contextWindow ?? null,
+            supportsVision: Array.isArray(profile?.capabilities) ? profile.capabilities.includes("vision") : null
+          };
+        })
       );
     res.json({
       activeModel: ollamaService.getActiveModel(),
@@ -1498,6 +1527,17 @@ router.post("/models/activate", async (req, res, next) => {
       return res.status(400).json({
         message: "Ce modele n'est pas installe. Telechargez-le avant de l'activer."
       });
+    }
+
+    if (role === "image") {
+      const profile = await ollamaService.getModelProfile(modelName);
+      // Refus seulement si Ollama declare explicitement les capacites du modele.
+      if (Array.isArray(profile?.capabilities) && !profile.capabilities.includes("vision")) {
+        return res.status(400).json({
+          message:
+            "Ce modele ne sait pas lire les images. Choisissez un modele de vision (ex : gemma3, qwen2.5vl, llava, mistral-small3.1) pour decrire les images des PDF."
+        });
+      }
     }
 
     markActivity();
@@ -1954,7 +1994,7 @@ router.post("/index/resume", async (_req, res, next) => {
   }
 });
 
-router.delete("/index", async (req, res, next) => {
+router.delete("/index", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const confirmation = String(req.body?.confirmation || "").trim().toLowerCase();
 
@@ -1974,6 +2014,7 @@ router.delete("/index", async (req, res, next) => {
     markActivity();
     const { clearedCollections } = await clearAllIndexes();
     resetAllDocumentIndexing();
+    logAudit(req, "index.clear-all", { details: { clearedCollections } });
 
     res.json({
       message:
@@ -2005,7 +2046,7 @@ router.patch("/index/auto", async (req, res, next) => {
   }
 });
 
-router.delete("/system/data", async (req, res, next) => {
+router.delete("/system/data", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const confirmation = String(req.body?.confirmation || "").trim().toLowerCase();
 
@@ -2037,7 +2078,7 @@ router.delete("/system/data", async (req, res, next) => {
   }
 });
 
-router.delete("/system/conversations-feedback", async (req, res, next) => {
+router.delete("/system/conversations-feedback", requireRole(["administrator", "owner"]), async (req, res, next) => {
   try {
     const confirmation = String(req.body?.confirmation || "").trim().toLowerCase();
 

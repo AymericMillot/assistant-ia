@@ -5,12 +5,67 @@ import Alert from "../../components/ui/Alert";
 import EmptyState from "../../components/ui/EmptyState";
 import StatusBadge from "../../components/ui/StatusBadge";
 
+const csvExports = [
+  { id: "questions", label: "Questions et réponses (90 jours)" },
+  { id: "top-questions", label: "Questions fréquentes" },
+  { id: "unanswered", label: "Questions sans réponse" },
+  { id: "ratings", label: "Évaluations 👍/👎" },
+  { id: "feedback", label: "Corrections" }
+];
+
 export default function AnalyticsManager() {
   const [topQuestions, setTopQuestions] = useState([]);
   const [unansweredQuestions, setUnansweredQuestions] = useState([]);
   const [scoreSummary, setScoreSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [resourceDraft, setResourceDraft] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  async function dismissQuestion(item) {
+    setBusyId(item.id);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await fetchJson(`/api/admin/analytics/unanswered-questions/${item.id}/dismiss`, {
+        method: "POST"
+      });
+      setMessage(payload.message);
+      setUnansweredQuestions((current) => current.filter((entry) => entry.id !== item.id));
+    } catch (requestError) {
+      setError(reportError("analytics:dismiss", requestError));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function submitResource(event) {
+    event.preventDefault();
+    if (!resourceDraft?.title.trim() || !resourceDraft?.content.trim()) {
+      return;
+    }
+
+    setBusyId(resourceDraft.exchangeId);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await fetchJson(
+        `/api/admin/analytics/unanswered-questions/${resourceDraft.exchangeId}/resource`,
+        {
+          method: "POST",
+          body: JSON.stringify({ title: resourceDraft.title, content: resourceDraft.content })
+        }
+      );
+      setMessage(payload.message);
+      setUnansweredQuestions((current) => current.filter((entry) => entry.id !== resourceDraft.exchangeId));
+      setResourceDraft(null);
+    } catch (requestError) {
+      setError(reportError("analytics:resource", requestError));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function loadAnalytics() {
     setLoading(true);
@@ -67,6 +122,21 @@ export default function AnalyticsManager() {
       </section>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
+      {message ? <Alert tone="success">{message}</Alert> : null}
+
+      <section className="subpanel p-6">
+        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Exports CSV</h3>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Fichiers compatibles Excel et LibreOffice, pour vos bilans d&apos;activité.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {csvExports.map((entry) => (
+            <a key={entry.id} className="ghost-button px-3 py-1.5 text-[13px]" href={`/api/admin/exports/${entry.id}`}>
+              ⬇ {entry.label}
+            </a>
+          ))}
+        </div>
+      </section>
 
       {scoreSummary ? (
         <section className="subpanel p-6">
@@ -143,7 +213,8 @@ export default function AnalyticsManager() {
           </h3>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             L'assistant a répondu sur ses connaissances générales, faute de contexte interne
-            suffisamment pertinent. Utile pour savoir quoi documenter en priorité.
+            suffisamment pertinent. Rédigez la bonne réponse : elle devient une personnalisation que
+            l'assistant utilisera dès la prochaine question.
           </p>
           <div className="mt-4 space-y-3">
             {unansweredQuestions.length === 0 ? (
@@ -158,6 +229,54 @@ export default function AnalyticsManager() {
                   <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
                     {formatDateTime(item.createdAt)}
                   </p>
+                  {resourceDraft?.exchangeId === item.id ? (
+                    <form className="mt-3 space-y-2" onSubmit={submitResource}>
+                      <input
+                        className="input"
+                        value={resourceDraft.title}
+                        maxLength={160}
+                        aria-label="Titre de la personnalisation"
+                        onChange={(event) => setResourceDraft({ ...resourceDraft, title: event.target.value })}
+                      />
+                      <textarea
+                        className="input min-h-[110px]"
+                        value={resourceDraft.content}
+                        maxLength={12000}
+                        autoFocus
+                        aria-label="Réponse ou consigne à donner à l'assistant"
+                        placeholder="La bonne réponse, ou la consigne à suivre pour ce type de question."
+                        onChange={(event) => setResourceDraft({ ...resourceDraft, content: event.target.value })}
+                      />
+                      <div className="flex gap-2">
+                        <button className="soft-button px-3 py-1.5 text-[13px]" type="submit" disabled={busyId === item.id}>
+                          Enregistrer
+                        </button>
+                        <button className="ghost-button px-3 py-1.5 text-[13px]" type="button" onClick={() => setResourceDraft(null)}>
+                          Annuler
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        className="soft-button px-3 py-1.5 text-[13px]"
+                        type="button"
+                        onClick={() =>
+                          setResourceDraft({ exchangeId: item.id, title: item.question.slice(0, 160), content: "" })
+                        }
+                      >
+                        Rédiger la réponse
+                      </button>
+                      <button
+                        className="ghost-button px-3 py-1.5 text-[13px]"
+                        type="button"
+                        disabled={busyId === item.id}
+                        onClick={() => dismissQuestion(item)}
+                      >
+                        Écarter
+                      </button>
+                    </div>
+                  )}
                 </article>
               ))
             )}

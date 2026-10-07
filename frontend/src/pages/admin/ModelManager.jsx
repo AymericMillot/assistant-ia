@@ -668,9 +668,18 @@ export default function ModelManager({ onRefreshSummary }) {
                   </p>
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
                     {model.contextLength
-                      ? `Contexte : ${model.contextLength.toLocaleString("fr-FR")} tokens`
+                      ? `Contexte : ${model.contextLength.toLocaleString("fr-FR")} tokens${
+                          model.effectiveContextLength && model.effectiveContextLength < model.contextLength
+                            ? ` (utilisé : ${model.effectiveContextLength.toLocaleString("fr-FR")}, selon la mémoire disponible)`
+                            : ""
+                        }`
                       : "Contexte : indisponible (Ollama injoignable ou modèle non interrogeable)"}
                   </p>
+                  {model.supportsVision ? (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Vision : lit les images (utilisable pour décrire les images des PDF)
+                    </p>
+                  ) : null}
                 </div>
                 {model.name === activeModel && (
                   <StatusBadge tone="info" withDot={false}>

@@ -183,6 +183,35 @@ ensure_env_file() {
   fi
 
   update_env_value "PROJECT_WORKSPACE_DIR" "$ROOT_DIR"
+
+  local socket_path
+  socket_path="$(detect_docker_socket_path)"
+  if [[ -n "$socket_path" && "$socket_path" != "$(get_env_value "DOCKER_SOCKET_PATH")" ]]; then
+    update_env_value "DOCKER_SOCKET_PATH" "$socket_path"
+  fi
+}
+
+# Chemin, sur l'hote, du socket du moteur Docker a monter dans l'updater.
+# /var/run/docker.sock couvre Docker Engine et Docker Desktop (qui intercepte
+# ce chemin precis, meme si son contexte pointe ailleurs). Pour Docker rootless
+# ou Podman, le socket est celui du contexte Docker actif (ou de DOCKER_HOST).
+detect_docker_socket_path() {
+  if [[ -S /var/run/docker.sock ]] \
+    || docker info --format '{{.OperatingSystem}}' 2>/dev/null | grep -qi 'docker desktop'; then
+    printf '/var/run/docker.sock'
+    return 0
+  fi
+
+  local host_uri="${DOCKER_HOST:-}"
+  if [[ -z "$host_uri" ]] && command -v docker >/dev/null 2>&1; then
+    host_uri="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+  fi
+  if [[ "$host_uri" == unix://* && -S "${host_uri#unix://}" ]]; then
+    printf '%s' "${host_uri#unix://}"
+    return 0
+  fi
+
+  printf '/var/run/docker.sock'
 }
 
 get_server_port() {
@@ -504,21 +533,41 @@ json_field() {
   ' "$field"
 }
 
-ensure_updater_running() {
-  if ! docker_compose_up_required updater; then
-    echo "Le service de mise a jour n'a pas pu demarrer." >&2
-    return 1
-  fi
-
-  for attempt in $(seq 1 30); do
+_updater_healthy() {
+  local attempts="${1:-30}"
+  local attempt
+  for attempt in $(seq 1 "$attempts"); do
     if docker exec assistant-ia-updater curl -sf http://127.0.0.1:3010/health >/dev/null 2>&1; then
-      return 0
+      # Repond, ET sait piloter Docker : sans cela, toute mise a jour lancee
+      # depuis l'interface echouerait (CLI trop ancien, socket mal monte).
+      docker exec assistant-ia-updater docker compose version >/dev/null 2>&1 \
+        && docker exec assistant-ia-updater docker version >/dev/null 2>&1 \
+        && return 0
+      return 1
     fi
-
     sleep 1
   done
+  return 1
+}
+
+# Demarre l'updater et verifie qu'il est reellement operationnel. S'il ne l'est
+# pas (image ancienne ou corrompue, conteneur bloque a l'etat "Created",
+# socket Docker deplace...), il est reconstruit puis recree d'office avant de
+# conclure a un echec.
+ensure_updater_running() {
+  docker_compose_up_required updater >/dev/null 2>&1 || true
+  if _updater_healthy 30; then
+    return 0
+  fi
+
+  echo "Service de mise a jour non operationnel : reconstruction..." >&2
+  docker rm -f assistant-ia-updater-rebuild >/dev/null 2>&1 || true
+  if docker_compose_up_build --force-recreate updater && _updater_healthy 60; then
+    return 0
+  fi
 
   echo "Le service de mise a jour n'est pas joignable." >&2
+  dump_recent_service_logs updater 30
   return 1
 }
 

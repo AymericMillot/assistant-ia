@@ -13,6 +13,8 @@ export function getOwnerPasswordHash() {
 
 export function setOwnerPasswordHash(hash) {
   setSetting("ownerPasswordHash", hash);
+  // Les sessions ouvertes avec l'ancien mot de passe deviennent invalides.
+  setSetting("ownerPasswordChangedAt", new Date().toISOString());
 }
 
 /**
@@ -30,6 +32,19 @@ export async function synchronizeOwnerBootstrapPassword(password = process.env.O
     throw new Error("La valeur locale doit contenir entre 16 et 256 caractères.");
   }
 
+  // Synchronise a chaque demarrage : on ne re-hache (et n'invalide les
+  // sessions) que si la valeur a reellement change.
+  const currentHash = getOwnerPasswordHash();
+  if (currentHash) {
+    try {
+      if (await bcrypt.compare(rawPassword, currentHash)) {
+        return { synchronized: false };
+      }
+    } catch {
+      // Hash illisible : il est remplace ci-dessous.
+    }
+  }
+
   const hash = await bcrypt.hash(rawPassword, 12);
   setOwnerPasswordHash(hash);
 
@@ -42,6 +57,8 @@ export function getTeacherPasswordHash() {
 
 export function setTeacherPasswordHash(hash) {
   setSetting("teacherPasswordHash", hash);
+  // Les sessions ouvertes avec l'ancien mot de passe deviennent invalides.
+  setSetting("teacherPasswordChangedAt", new Date().toISOString());
 }
 
 export function isTeacherPasswordChangeRequired() {
@@ -79,17 +96,19 @@ export async function generateAndSetTeacherPassword() {
  * - "referent" : accès aux fonctions d'administration courantes
  * - null si aucune correspondance
  */
-export function validateAccessPassword(password) {
+export async function validateAccessPassword(password) {
   if (!password) {
     return null;
   }
 
   const rawPassword = password.trim();
 
+  // Comparaisons asynchrones : bcrypt (cout 12) bloquerait sinon le serveur
+  // entier plusieurs centaines de millisecondes a chaque tentative.
   const ownerHash = getOwnerPasswordHash();
   if (ownerHash) {
     try {
-      if (bcrypt.compareSync(rawPassword, ownerHash)) {
+      if (await bcrypt.compare(rawPassword, ownerHash)) {
         return "owner";
       }
     } catch {
@@ -100,7 +119,7 @@ export function validateAccessPassword(password) {
   const teacherHash = getTeacherPasswordHash();
   if (teacherHash) {
     try {
-      if (bcrypt.compareSync(rawPassword, teacherHash)) {
+      if (await bcrypt.compare(rawPassword, teacherHash)) {
         return "referent";
       }
     } catch {

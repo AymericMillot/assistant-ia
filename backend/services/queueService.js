@@ -17,6 +17,7 @@ import { buildAttachmentPromptContext } from "./attachmentService.js";
 import * as fileService from "./fileService.js";
 import * as ollamaService from "./ollamaService.js";
 import * as ragService from "./ragService.js";
+import { markSkillsUsed } from "./skillService.js";
 import {
   markChatFinished,
   markChatStarted,
@@ -92,40 +93,22 @@ function getAverageDurationMs() {
   return recentAverageMs * recentWeight + historicalAverageMs * (1 - recentWeight);
 }
 
+// Une seule ecriture par evenement (un appel systeme par token au lieu de deux).
 function writeSseEvent(res, eventName, payload) {
-  res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
+  if (res.writableEnded || res.destroyed) {
+    return;
+  }
 
-async function getOrderedJobs() {
-  const [activeJobs, waitingJobs] = await Promise.all([
-    queue.getJobs(["active"]),
-    queue.getJobs(["waiting"])
-  ]);
-
-  const sortJobs = (jobs) =>
-    jobs.sort((left, right) => {
-      const leftPriority = left.opts.priority || 2;
-      const rightPriority = right.opts.priority || 2;
-
-      if (leftPriority !== rightPriority) {
-        return leftPriority - rightPriority;
-      }
-
-      return left.timestamp - right.timestamp;
-    });
-
-  return {
-    activeJobs: sortJobs(activeJobs),
-    allJobs: [...sortJobs(activeJobs), ...sortJobs(waitingJobs)]
-  };
+  res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 // Nombre de demandes actives + en attente : utilise pour affiner l'estimation de delai
 // de reponse (l'attente en file grandit avec ce nombre, cf buildTimingModel).
+// Simples compteurs Redis : appele a chaque frappe dans le chat, il ne doit pas
+// relire le contenu de tous les jobs (centaines pendant une indexation).
 export async function getCurrentQueueDepth() {
-  const { allJobs } = await getOrderedJobs();
-  return allJobs.length;
+  const counts = await queue.getJobCounts();
+  return Number(counts.active || 0) + Number(counts.waiting || 0);
 }
 
 export async function getQueueStatus(clientId) {
@@ -138,19 +121,21 @@ export async function getQueueStatus(clientId) {
 }
 
 async function broadcastQueuePositions() {
-  const { activeJobs, allJobs } = await getOrderedJobs();
-  const clientIds = [...new Set(allJobs.map((job) => job.data.clientId).filter(Boolean))];
+  // Appele a chaque job demarre/termine : compteurs uniquement (lire tous les
+  // jobs a chaque fois rendait une grosse indexation quadratique). Seuls les
+  // clients ayant un flux de chat ouvert peuvent attendre une reponse.
+  const counts = await queue.getJobCounts();
 
   await Promise.all(
-    clientIds.map(async (clientId) => {
+    [...chatStreams.keys()].map(async (clientId) => {
       const status = await getQueueStatus(clientId);
       emitToClient(clientId, "queue:update", status);
     })
   );
 
   broadcast("queue:global", {
-    totalInQueue: allJobs.length,
-    isProcessing: activeJobs.length > 0,
+    totalInQueue: Number(counts.active || 0) + Number(counts.waiting || 0),
+    isProcessing: Number(counts.active || 0) > 0,
     averageResponseSeconds: Math.round(getAverageDurationMs() / 1000)
   });
 }
@@ -191,8 +176,39 @@ function resetReindexIdleState() {
   reindexState.startedAt = null;
 }
 
+// La progression est publiee a chaque lot d'embeddings ; getIndexingStatus()
+// interroge SQLite et chaque client admin recharge sa liste a reception. On
+// limite donc l'envoi a un toutes les indexingProgressMinIntervalMs, le dernier
+// etat etant toujours transmis (envoi differe).
+const indexingProgressMinIntervalMs = Number(process.env.INDEXING_PROGRESS_MIN_INTERVAL_MS || 400);
+let lastIndexingProgressAt = 0;
+let pendingIndexingProgressTimer = null;
+
+function emitIndexingProgressNow() {
+  if (pendingIndexingProgressTimer) {
+    clearTimeout(pendingIndexingProgressTimer);
+    pendingIndexingProgressTimer = null;
+  }
+
+  lastIndexingProgressAt = Date.now();
+  try {
+    broadcast("indexing:progress", getIndexingStatus());
+  } catch (error) {
+    logger.warn("Diffusion de la progression d'indexation impossible.", { message: error.message });
+  }
+}
+
 function publishIndexingProgress() {
-  broadcast("indexing:progress", getIndexingStatus());
+  const elapsedMs = Date.now() - lastIndexingProgressAt;
+  if (elapsedMs >= indexingProgressMinIntervalMs) {
+    emitIndexingProgressNow();
+    return;
+  }
+
+  if (!pendingIndexingProgressTimer) {
+    pendingIndexingProgressTimer = setTimeout(emitIndexingProgressNow, indexingProgressMinIntervalMs - elapsedMs);
+    pendingIndexingProgressTimer.unref?.();
+  }
 }
 
 function upsertActiveDocumentIndex(documentId, patch = {}) {
@@ -248,7 +264,8 @@ async function processChatJob(job) {
     const { messages, promptPreview, sources, responseOverride, grounding, retrieval } = await ragService.buildRagPayload(
       job.data.question,
       job.data.folderName,
-      job.data.history || []
+      job.data.history || [],
+      { modelName }
     );
 
     if (responseOverride !== undefined && responseOverride !== null) {
@@ -298,10 +315,13 @@ async function processChatJob(job) {
       };
     }
 
+    const fitted = await ragService.fitChatMessagesForModel(messages, modelName, { retrieval });
+    writeSseEvent(stream.res, "context", fitted.context);
+
     const { text, payload } = await ollamaService.streamChatAnswer(
       {
         model: modelName,
-        messages,
+        messages: fitted.messages,
         signal: controller.signal
       },
       {
@@ -339,7 +359,7 @@ async function processChatJob(job) {
       question: job.data.question,
       folderName: job.data.folderName,
       modelName,
-      prompt: promptPreview || "",
+      prompt: fitted.promptPreview || promptPreview || "",
       responseText: finalText,
       queueDelayMs,
       processingDurationMs,
@@ -400,6 +420,7 @@ export async function processDirectChatRequest({
   attachmentIds = [],
   sessionId = null,
   useReasoningModel = false,
+  skillId = null,
   persistExchange = null
 }) {
   const stream = chatStreams.get(String(clientId));
@@ -447,7 +468,7 @@ export async function processDirectChatRequest({
       question,
       folderName,
       history,
-      { sessionId, hasAttachments: Boolean(attachmentContext) }
+      { sessionId, hasAttachments: Boolean(attachmentContext), skillId, modelName }
     );
 
     if (responseOverride !== undefined && responseOverride !== null) {
@@ -477,6 +498,7 @@ export async function processDirectChatRequest({
       writeSseEvent(stream.res, "done", {
         text: responseOverride,
         grounding,
+        skills: [],
         ...exchangeIds,
         metrics: {
           promptTokens: 0,
@@ -507,14 +529,21 @@ export async function processDirectChatRequest({
     if (attachmentContext) {
       messages.splice(messages.length - 1, 0, {
         role: "system",
+        kind: "attachment",
         content: attachmentContext
       });
     }
 
+    const fitted = await ragService.fitChatMessagesForModel(messages, modelName, {
+      isReasoning: Boolean(reasoningModelName),
+      retrieval
+    });
+    writeSseEvent(stream.res, "context", fitted.context);
+
     const { text, payload } = await ollamaService.streamChatAnswer(
       {
         model: modelName,
-        messages,
+        messages: fitted.messages,
         signal: controller.signal
       },
       {
@@ -543,7 +572,7 @@ export async function processDirectChatRequest({
       question,
       folderName,
       modelName,
-      prompt: promptPreview || "",
+      prompt: fitted.promptPreview || promptPreview || "",
       responseText: finalText,
       queueDelayMs: 0,
       processingDurationMs,
@@ -556,9 +585,13 @@ export async function processDirectChatRequest({
       ragService.buildRetrievalMetadataSummary(retrieval, grounding)
     );
 
+    const usedSkills = retrieval?.skills || [];
+    markSkillsUsed(usedSkills);
+
     writeSseEvent(stream.res, "done", {
       text: finalText,
       grounding,
+      skills: usedSkills.map((skill) => ({ id: skill.id, title: skill.title })),
       ...exchangeIds,
       metrics: {
         promptTokens: Number(payload?.prompt_eval_count || 0),
@@ -608,7 +641,8 @@ export async function generateChatResponse({
   history = [],
   attachmentIds = [],
   sessionId = null,
-  useReasoningModel = false
+  useReasoningModel = false,
+  skillId = null
 }) {
   const reasoningModelName = useReasoningModel ? ollamaService.getActiveModelByRole("reasoning") : "";
   const modelName = reasoningModelName || ollamaService.getActiveModel();
@@ -620,12 +654,13 @@ export async function generateChatResponse({
     question,
     folderName,
     history,
-    { sessionId, hasAttachments: Boolean(attachmentContext) }
+    { sessionId, hasAttachments: Boolean(attachmentContext), skillId, modelName }
   );
 
   if (messages && attachmentContext) {
     messages.splice(messages.length - 1, 0, {
       role: "system",
+      kind: "attachment",
       content: attachmentContext
     });
   }
@@ -659,9 +694,13 @@ export async function generateChatResponse({
     };
   }
 
+  const fitted = await ragService.fitChatMessagesForModel(messages, modelName, {
+    isReasoning: Boolean(reasoningModelName),
+    retrieval
+  });
   const { text, payload } = await ollamaService.generateChatAnswer({
     model: modelName,
-    messages
+    messages: fitted.messages
   });
   const totalDurationMs =
     Number(payload?.total_duration || 0) > 0
@@ -674,7 +713,7 @@ export async function generateChatResponse({
     question,
     folderName,
     modelName,
-    prompt: promptPreview || "",
+    prompt: fitted.promptPreview || promptPreview || "",
     responseText: finalText,
     queueDelayMs: 0,
     processingDurationMs: totalDurationMs,
@@ -682,10 +721,14 @@ export async function generateChatResponse({
     ollamaPayload: payload
   });
 
+  const usedSkills = retrieval?.skills || [];
+  markSkillsUsed(usedSkills);
+
   return {
     text: finalText,
     sources: visibleSources,
     grounding,
+    skills: usedSkills.map((skill) => ({ id: skill.id, title: skill.title })),
     retrievalMetadata: ragService.buildRetrievalMetadataSummary(retrieval, grounding),
     metrics: {
       promptTokens: Number(payload?.prompt_eval_count || 0),
@@ -735,10 +778,14 @@ async function processDocumentIndexJob(job) {
           pollMs: 750
         });
       },
-      onProgress: async ({ processedChunks, totalChunks }) => {
+      onProgress: async ({ stage, processedChunks, totalChunks, processedPages, totalPages }) => {
         upsertActiveDocumentIndex(normalizedDocumentId, {
+          stage: stage || "embedding",
           chunkCount: Number(processedChunks || 0),
-          totalChunks: Number(totalChunks || 0)
+          totalChunks: Number(totalChunks || 0),
+          ...(stage === "vision"
+            ? { visionPagesProcessed: Number(processedPages || 0), visionPagesTotal: Number(totalPages || 0) }
+            : {})
         });
         publishIndexingProgress();
       }
@@ -817,12 +864,37 @@ async function processFullReindexJob(job) {
   await waitForIndexingResume();
   resetReindexState(job.data.trigger || "manuel");
   publishIndexingProgress();
-  let createdChunks = 0;
 
   logIndexation("Debut d'une reindexation complete", {
     trigger: job.data.trigger || "manuel"
   });
 
+  try {
+    return await runFullReindex();
+  } catch (error) {
+    // Erreur hors de la boucle par document (ChromaDB ou disque indisponible) :
+    // l'etat ne doit pas rester bloque sur "en cours" dans l'administration.
+    logIndexation(
+      "Reindexation complete interrompue par une erreur",
+      { message: error.message },
+      "error"
+    );
+    throw error;
+  } finally {
+    if (reindexState.isRunning) {
+      reindexState.isRunning = false;
+      reindexState.isPending = false;
+      reindexState.currentFile = null;
+      reindexState.currentDocumentChunkCount = 0;
+      reindexState.currentDocumentTotalChunks = 0;
+      reindexState.lastCompletedAt = new Date().toISOString();
+      publishIndexingProgress();
+    }
+  }
+}
+
+async function runFullReindex() {
+  let createdChunks = 0;
   const syncResult = await fileService.syncFilesystemToDatabase();
   for (const removed of syncResult.removedRecords) {
     await ragService.deleteDocumentFromIndex(removed);
@@ -850,6 +922,8 @@ async function processFullReindexJob(job) {
     reindexState.currentFile = document.originalName;
     reindexState.currentDocumentChunkCount = 0;
     reindexState.currentDocumentTotalChunks = 0;
+    reindexState.currentDocumentStage = null;
+    reindexState.currentDocumentVisionPages = null;
     publishIndexingProgress();
 
     try {
@@ -862,7 +936,10 @@ async function processFullReindexJob(job) {
             pollMs: 750
           });
         },
-        onProgress: async ({ processedChunks, totalChunks }) => {
+        onProgress: async ({ stage, processedChunks, totalChunks, processedPages, totalPages }) => {
+          reindexState.currentDocumentStage = stage || "embedding";
+          reindexState.currentDocumentVisionPages =
+            stage === "vision" ? `${Number(processedPages || 0)}/${Number(totalPages || 0)}` : null;
           reindexState.currentDocumentChunkCount = Number(processedChunks || 0);
           reindexState.currentDocumentTotalChunks = Number(totalChunks || 0);
           reindexState.createdChunks = createdChunks + Number(processedChunks || 0);
@@ -947,6 +1024,12 @@ async function processFullReindexJob(job) {
 }
 
 async function enforceWaitingTimeouts() {
+  // Le delai d'attente ne concerne que les jobs de chat, qui ont toujours un
+  // flux ouvert : inutile de relire toute la file (indexation) sans eux.
+  if (chatStreams.size === 0) {
+    return;
+  }
+
   const waitingJobs = await queue.getJobs(["waiting"]);
 
   for (const job of waitingJobs) {
@@ -1339,7 +1422,10 @@ export function getIndexingStatus() {
       queuedAt: entry.queuedAt || null,
       startedAt: entry.startedAt || null,
       chunkCount: Number(entry.chunkCount || 0),
-      totalChunks: Number(entry.totalChunks || 0)
+      totalChunks: Number(entry.totalChunks || 0),
+      stage: entry.stage || null,
+      visionPagesProcessed: Number(entry.visionPagesProcessed || 0),
+      visionPagesTotal: Number(entry.visionPagesTotal || 0)
     }));
 
   return {
@@ -1447,6 +1533,24 @@ export async function stopAllIndexing() {
     removedFullReindex,
     requestedFullReindexStop
   };
+}
+
+/**
+ * Arret du serveur : les generations en cours sont interrompues et chaque
+ * client recoit un message explicite plutot qu'une connexion coupee.
+ */
+export function abortActiveChatStreams(message) {
+  [...directChatAbortControllers.values(), ...abortControllers.values()].forEach((controller) =>
+    controller.abort()
+  );
+
+  for (const stream of chatStreams.values()) {
+    writeSseEvent(stream.res, "error", { message });
+    if (!stream.res.writableEnded) {
+      stream.res.end();
+    }
+  }
+  chatStreams.clear();
 }
 
 export async function shutdownQueue() {

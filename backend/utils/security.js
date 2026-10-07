@@ -1,3 +1,5 @@
+import path from "path";
+
 const rateLimitStores = new Map();
 const rateLimitCleanupTimers = new Map();
 
@@ -164,7 +166,7 @@ export function securityHeaders(_req, res, next) {
   res.setHeader("Origin-Agent-Cluster", "?1");
   res.setHeader(
     "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), browsing-topics=()"
+    "camera=(), microphone=(self), geolocation=(), browsing-topics=()"
   );
   res.setHeader(
     "Content-Security-Policy",
@@ -316,10 +318,11 @@ export function ensureSafeHttpUrl(value, fieldName = "URL", { max = 2000 } = {})
 }
 
 export function ensurePathInside(basePath, targetPath, fieldName = "Chemin") {
-  const resolvedBase = new URL(`file://${basePath.endsWith("/") ? basePath : `${basePath}/`}`);
-  const resolvedTarget = new URL(`file://${targetPath}`);
+  // Comparaison sur chemins normalises (et non sur des URL, ou "#", "?" et
+  // "%" ont un sens particulier) : la cible doit etre strictement sous la base.
+  const relative = path.relative(path.resolve(basePath), path.resolve(targetPath));
 
-  if (!resolvedTarget.href.startsWith(resolvedBase.href)) {
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw forbiddenError(`${fieldName} invalide.`);
   }
 

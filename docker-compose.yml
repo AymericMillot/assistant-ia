@@ -16,7 +16,8 @@ services:
     environment:
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
-      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      # Modele de conversation + modele d'embedding charges ensemble (voir .env.example).
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 15s
@@ -59,6 +60,11 @@ services:
     build:
       context: .
       dockerfile: ./backend/Dockerfile
+      # Proxy d'etablissement eventuel (.env) : voir le service updater.
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: assistant-ia-backend
     restart: unless-stopped
     ports:
@@ -107,11 +113,26 @@ services:
   updater:
     build:
       context: ./updater
+      # Proxy d'etablissement eventuel (.env) transmis a la construction de
+      # l'image (apt-get, npm) : sans lui, la reconstruction echoue derriere un
+      # proxy et l'updater reste sur une ancienne image.
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: assistant-ia-updater
-    restart: unless-stopped
+    # "always" plutot que "unless-stopped" : l'updater doit revenir apres un
+    # redemarrage du moteur Docker meme s'il avait ete arrete entre-temps (par
+    # exemple pendant sa propre reconstruction), sinon plus aucune mise a jour
+    # n'est possible depuis l'interface.
+    restart: always
+    init: true
     volumes:
       - ${PROJECT_WORKSPACE_DIR:-.}/:/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Socket du moteur Docker : /var/run/docker.sock par defaut (Docker
+      # Engine, Docker Desktop). DOCKER_SOCKET_PATH (renseigne par install.sh /
+      # restart.sh) couvre Docker rootless et Podman, dont le socket est ailleurs.
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       UPDATE_WORKSPACE_DIR: /workspace
       UPDATE_CONFIG_PATH: /workspace/update.config.json
@@ -123,6 +144,8 @@ services:
       # Sans proxy configure, c'est un no-op. Indispensable derriere un proxy
       # d'etablissement (cas frequent en site universitaire/lycee).
       NODE_USE_ENV_PROXY: 1
+      # Socket vu a l'interieur du conteneur (le chemin hote est dans .env).
+      DOCKER_HOST: unix:///var/run/docker.sock
     env_file:
       - .env
     healthcheck:

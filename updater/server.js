@@ -90,6 +90,13 @@ const effectiveReleaseTtlMs = Math.max(remoteReleaseTtlMs, minReleaseRefreshGapM
 // Cache persiste sur disque : survit aux redemarrages du conteneur updater (qui
 // se reconstruit lui-meme apres chaque mise a jour) pour que le compteur
 // quotidien ne reparte pas de zero a chaque redemarrage.
+// Espacement des nouvelles tentatives quand aucune liste n'a encore pu etre
+// recuperee (premiere installation, reseau coupe au demarrage...).
+const noCacheRetryGapMs = Math.max(10000, Number(process.env.UPDATE_NO_CACHE_RETRY_MS || 2 * 60 * 1000));
+// Temps maximal pendant lequel /status attend la source distante : au-dela, la
+// reponse part avec le cache (ou "verification en cours") et la verification
+// continue en arriere-plan. Reste sous le delai d'attente du backend (12 s).
+const statusRemoteWaitMs = Math.max(1000, Number(process.env.UPDATE_STATUS_REMOTE_WAIT_MS || 6000));
 const releaseCacheFilePath =
   String(process.env.UPDATE_RELEASE_CACHE_FILE || "").trim() ||
   path.join(workspaceDir, ".update-release-cache.json");
@@ -223,58 +230,80 @@ async function readVersion() {
   return payload.version || "1.000";
 }
 
-async function detectHostWorkspaceDirFromDocker() {
-  const currentContainerId = String(process.env.HOSTNAME || "").trim();
-  if (!currentContainerId) {
-    return "";
-  }
-
-  return new Promise((resolve) => {
-    const child = spawn(
-      "docker",
-      [
-        "inspect",
-        currentContainerId,
-        "--format",
-        "{{range .Mounts}}{{if eq .Destination \"/workspace\"}}{{.Source}}{{end}}{{end}}"
-      ],
-      {
-        stdio: ["ignore", "pipe", "pipe"]
-      }
-    );
-
-    let stdout = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.on("error", () => resolve(""));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-        return;
-      }
-      resolve("");
-    });
-  });
+// Identifiants possibles de ce conteneur : HOSTNAME (id court par defaut) puis
+// le nom fixe declare dans docker-compose.yml (si le hostname a ete change).
+function getSelfContainerCandidates() {
+  return [String(process.env.HOSTNAME || "").trim(), "assistant-ia-updater"].filter(
+    (value, index, array) => value && array.indexOf(value) === index
+  );
 }
 
+function inspectSelf(format) {
+  return (async () => {
+    for (const candidate of getSelfContainerCandidates()) {
+      const output = await new Promise((resolve) => {
+        const child = spawn("docker", ["inspect", candidate, "--format", format], {
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+        let stdout = "";
+        const timer = setTimeout(() => child.kill("SIGKILL"), 20000);
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        child.on("error", () => {
+          clearTimeout(timer);
+          resolve("");
+        });
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          resolve(code === 0 ? stdout.trim() : "");
+        });
+      });
+      if (output) {
+        return output;
+      }
+    }
+    return "";
+  })();
+}
+
+function detectOwnMountSource(destination) {
+  return inspectSelf(
+    `{{range .Mounts}}{{if eq .Destination "${destination}"}}{{.Source}}{{end}}{{end}}`
+  );
+}
+
+// Chemin du projet SUR L'HOTE (les volumes de docker-compose.yml sont resolus
+// par le moteur Docker, donc cote hote). Ne jamais retomber sur "/workspace"
+// tant qu'une meilleure source existe : compose monterait alors des dossiers
+// vides a la place des donnees du backend. Le resultat n'est memorise que s'il
+// est fiable, pour qu'une detection ratee (moteur momentanement injoignable)
+// soit retentee au prochain appel.
 async function getHostWorkspaceDir() {
+  if (hostWorkspaceDirOverride) {
+    return hostWorkspaceDirOverride;
+  }
   if (!hostWorkspaceDirPromise) {
     hostWorkspaceDirPromise = (async () => {
-      if (hostWorkspaceDirOverride) {
-        return hostWorkspaceDirOverride;
+      const detected = await detectOwnMountSource("/workspace");
+      if (detected) {
+        return detected;
       }
-
-      const detectedHostWorkspaceDir = await detectHostWorkspaceDirFromDocker();
-      if (detectedHostWorkspaceDir) {
-        return detectedHostWorkspaceDir;
-      }
-
-      return workspaceDir;
+      hostWorkspaceDirPromise = null;
+      const fromEnv = String(process.env.PROJECT_WORKSPACE_DIR || "").trim();
+      return fromEnv && fromEnv !== "." ? fromEnv : workspaceDir;
     })();
   }
 
   return hostWorkspaceDirPromise;
+}
+
+async function getHostDockerSocketPath() {
+  return (
+    (await detectOwnMountSource("/var/run/docker.sock")) ||
+    String(process.env.DOCKER_SOCKET_PATH || "").trim() ||
+    "/var/run/docker.sock"
+  );
 }
 
 function normalizeVersion(version) {
@@ -456,12 +485,39 @@ function findGithubAsset(assets, expectedName) {
   return (Array.isArray(assets) ? assets : []).find((asset) => asset?.name === expectedName) || null;
 }
 
-async function fetchGithubReleases(serverConfig, headers = {}) {
+// Le SHA-256 est publie dans le corps de la release, pas en asset.
+// Format attendu : "sha256 (<archive>.tar.gz): <64 hex>" ; a defaut, le
+// premier "sha256 ... <64 hex>" du corps.
+function extractReleaseSha256(body, packageName) {
+  const escapedPackage = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const targetedSha =
+    body.match(new RegExp(`${escapedPackage}[^0-9a-f]{0,20}([0-9a-f]{64})`, "i")) ||
+    body.match(/sha-?256[^0-9a-f]{0,40}([0-9a-f]{64})/i) ||
+    body.match(/\b([0-9a-f]{64})\b/i);
+  return targetedSha ? targetedSha[1].toLowerCase() : "";
+}
+
+function finalizeGithubReleases(releases) {
+  const validReleases = dedupeReleasesByVersion(releases.filter(Boolean));
+  if (validReleases.length === 0) {
+    throw new Error("Aucune release GitHub complète et vérifiable n'est disponible.");
+  }
+  // Trie par version decroissante plutot que de se fier a l'ordre de creation
+  // GitHub.
+  validReleases.sort((left, right) => compareVersions(right.version, left.version));
+  return validReleases;
+}
+
+function getGithubRepository(serverConfig) {
   const repository = String(serverConfig?.repository || "").trim();
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
     throw new Error("Le dépôt GitHub de mise à jour est invalide.");
   }
+  return repository;
+}
 
+async function fetchGithubReleasesFromApi(serverConfig, headers = {}) {
+  const repository = getGithubRepository(serverConfig);
   const apiBaseUrl = String(serverConfig?.apiBaseUrl || "https://api.github.com").replace(/\/+$/, "");
   // Jeton optionnel : l'API GitHub non authentifiée est limitee a 60 requetes/
   // heure par IP (largement atteignable a plusieurs installations derriere la
@@ -488,60 +544,132 @@ async function fetchGithubReleases(serverConfig, headers = {}) {
   }
 
   const payload = await response.json();
-  const releases = await Promise.all(
-    (Array.isArray(payload) ? payload : [])
-      .filter((release) => !release?.draft && !release?.prerelease)
-      .map(async (release) => {
-        const version = normalizeGithubReleaseVersion(release.tag_name);
-        if (!isVersionFolderName(version)) {
-          return null;
-        }
+  const requireSha256 = serverConfig?.requireSha256 !== false;
+  const releases = (Array.isArray(payload) ? payload : [])
+    .filter((release) => !release?.draft && !release?.prerelease)
+    .map((release) => {
+      const version = normalizeGithubReleaseVersion(release.tag_name);
+      if (!isVersionFolderName(version)) {
+        return null;
+      }
 
-        // Assets = uniquement le code source. On resout l'archive .tar.gz
-        // attendue par nom.
-        const packageName = resolvePackageFileName(serverConfig, version);
-        const packageAsset = findGithubAsset(release.assets, packageName);
-        if (!packageAsset?.browser_download_url) {
-          return null;
-        }
+      // Assets = uniquement le code source. On resout l'archive .tar.gz
+      // attendue par nom.
+      const packageName = resolvePackageFileName(serverConfig, version);
+      const packageAsset = findGithubAsset(release.assets, packageName);
+      if (!packageAsset?.browser_download_url) {
+        return null;
+      }
 
-        // Le SHA-256 est publie dans le corps de la release, pas en asset.
-        // Format attendu : "sha256 (<archive>.tar.gz): <64 hex>" ; a defaut,
-        // le premier "sha256 ... <64 hex>" du corps.
-        const body = String(release.body || "");
-        const escapedPackage = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const targetedSha =
-          body.match(new RegExp(`${escapedPackage}[^0-9a-f]{0,20}([0-9a-f]{64})`, "i")) ||
-          body.match(/sha-?256[^0-9a-f]{0,40}([0-9a-f]{64})/i) ||
-          body.match(/\b([0-9a-f]{64})\b/i);
-        const sha256 = targetedSha ? targetedSha[1].toLowerCase() : "";
+      const body = String(release.body || "");
+      const sha256 = extractReleaseSha256(body, packageName);
+      if (requireSha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
+        // Empreinte obligatoire mais introuvable dans le corps : release ignoree.
+        return null;
+      }
 
-        const requireSha256 = serverConfig?.requireSha256 !== false;
-        if (requireSha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
-          // Empreinte obligatoire mais introuvable dans le corps : release ignoree.
-          return null;
-        }
+      return {
+        version,
+        packageUrl: packageAsset.browser_download_url,
+        notes: body.trim(),
+        notesUrl: release.html_url || "",
+        releaseUrl: release.html_url || String(serverConfig?.latestReleaseUrl || ""),
+        sha256,
+        publishedAt: release.published_at || ""
+      };
+    });
 
-        return {
-          version,
-          packageUrl: packageAsset.browser_download_url,
-          notes: body.trim(),
-          notesUrl: release.html_url || "",
-          releaseUrl: release.html_url || String(serverConfig?.latestReleaseUrl || ""),
-          sha256,
-          publishedAt: release.published_at || ""
-        };
-      })
-  );
+  return finalizeGithubReleases(releases);
+}
 
-  const validReleases = dedupeReleasesByVersion(releases.filter(Boolean));
-  if (validReleases.length === 0) {
-    throw new Error("Aucune release GitHub complète et vérifiable n'est disponible.");
+function decodeXmlEntities(value) {
+  return String(value || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&amp;/g, "&");
+}
+
+function htmlToText(html) {
+  return decodeXmlEntities(
+    String(html || "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|li|h[1-6]|pre|div)>/gi, "\n")
+      .replace(/<li[^>]*>/gi, "- ")
+      .replace(/<[^>]+>/g, "")
+  )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Repli sans API : le flux Atom public des releases (github.com/<depot>/
+// releases.atom) n'est pas soumis au quota de l'API (60 req/h par IP, vite
+// epuise derriere le NAT d'un etablissement) et contient le corps de chaque
+// release, donc l'empreinte SHA-256. L'URL de l'archive suit le schema stable
+// /releases/download/<tag>/<archive>. Une archive absente fait echouer le
+// telechargement AVANT toute modification des fichiers.
+async function fetchGithubReleasesFromAtom(serverConfig, headers = {}) {
+  const repository = getGithubRepository(serverConfig);
+  const webBaseUrl = String(serverConfig?.webBaseUrl || "https://github.com").replace(/\/+$/, "");
+  const response = await fetchWithTimeout(`${webBaseUrl}/${repository}/releases.atom`, {
+    headers: { Accept: "application/atom+xml", ...headers }
+  });
+  if (!response.ok) {
+    throw new Error(`Flux des releases GitHub indisponible (${response.status}).`);
   }
-  // Trie par version decroissante plutot que de se fier a l'ordre de creation
-  // GitHub.
-  validReleases.sort((left, right) => compareVersions(right.version, left.version));
-  return validReleases;
+
+  const feed = await response.text();
+  const requireSha256 = serverConfig?.requireSha256 !== false;
+  const releases = [...feed.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map(([, entry]) => {
+    const link = (entry.match(/<link[^>]*href="([^"]+)"/) || [])[1] || "";
+    let tag = "";
+    try {
+      tag = decodeURIComponent((link.match(/\/releases\/tag\/([^/?#]+)/) || [])[1] || "");
+    } catch {
+      return null;
+    }
+    const version = normalizeGithubReleaseVersion(tag);
+    if (!tag || !isVersionFolderName(version)) {
+      return null;
+    }
+
+    const packageName = resolvePackageFileName(serverConfig, version);
+    // Corps HTML echappe dans le XML : on le desechappe avant d'oter les balises.
+    const notes = htmlToText(decodeXmlEntities((entry.match(/<content[^>]*>([\s\S]*?)<\/content>/) || [])[1] || ""));
+    const sha256 = extractReleaseSha256(notes, packageName);
+    if (requireSha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
+      return null;
+    }
+
+    const releaseUrl = decodeXmlEntities(link);
+    return {
+      version,
+      packageUrl: `${webBaseUrl}/${repository}/releases/download/${encodeURIComponent(tag)}/${packageName}`,
+      notes,
+      notesUrl: releaseUrl,
+      releaseUrl,
+      sha256,
+      publishedAt: (entry.match(/<updated>([^<]+)<\/updated>/) || [])[1] || ""
+    };
+  });
+
+  return finalizeGithubReleases(releases);
+}
+
+async function fetchGithubReleases(serverConfig, headers = {}) {
+  try {
+    return await fetchGithubReleasesFromApi(serverConfig, headers);
+  } catch (apiError) {
+    try {
+      const releases = await fetchGithubReleasesFromAtom(serverConfig, headers);
+      pushLog(`API GitHub indisponible (${apiError.message}) : liste des versions lue depuis le flux public.`);
+      return releases;
+    } catch {
+      throw apiError;
+    }
+  }
 }
 
 async function tryFetchText(url, headers = {}) {
@@ -680,6 +808,7 @@ async function loadPersistentReleaseCache() {
         releases: Array.isArray(parsed.releases) ? parsed.releases : null,
         fetchedAt: Number(parsed.fetchedAt) || 0,
         lastAttemptAt: Number(parsed.lastAttemptAt) || 0,
+        lastError: String(parsed.lastError || ""),
         budgetDay: String(parsed.budgetDay || ""),
         budgetCount: Number(parsed.budgetCount) || 0
       };
@@ -757,15 +886,21 @@ async function resolveRemoteReleasesRateLimited() {
     return { releases: cache.releases, config, stale: true, budget };
   }
 
-  if (budgetUsed >= githubMaxCallsPerDay) {
-    if (hasCache) {
-      return { releases: cache.releases, config, stale: true, budget };
-    }
+  // Sans cache, un echec ne doit pas etre rejoue a chaque sondage de
+  // l'interface (toutes les 3 s) : cela epuisait le plafond quotidien en
+  // quelques secondes et rendait le service "indisponible" jusqu'au lendemain.
+  // On espace donc les nouvelles tentatives (noCacheRetryGapMs).
+  if (!hasCache && cache.lastAttemptAt && now - cache.lastAttemptAt < noCacheRetryGapMs) {
     throw new Error(
-      `Plafond de ${githubMaxCallsPerDay} verifications de mise a jour par 24 h atteint ` +
-        "et aucune donnee en cache. Nouvelle tentative demain, ou configurez " +
-        "UPDATE_GITHUB_TOKEN (limite API relevee) / UPDATE_GITHUB_MAX_CALLS_PER_DAY."
+      cache.lastError ||
+        "La source des mises a jour est momentanement injoignable. Nouvelle tentative dans quelques minutes."
     );
+  }
+
+  // Sans aucune donnee en cache, le plafond n'est pas bloquant : il protege
+  // l'API d'un sondage trop frequent, deja borne par noCacheRetryGapMs.
+  if (budgetUsed >= githubMaxCallsPerDay && hasCache) {
+    return { releases: cache.releases, config, stale: true, budget };
   }
 
   // Budget disponible + cache perime : on interroge la source pour de vrai.
@@ -775,6 +910,7 @@ async function resolveRemoteReleasesRateLimited() {
       releases,
       fetchedAt: now,
       lastAttemptAt: now,
+      lastError: "",
       budgetDay: today,
       budgetCount: budgetUsed + 1
     });
@@ -792,6 +928,7 @@ async function resolveRemoteReleasesRateLimited() {
       releases: cache.releases,
       fetchedAt: cache.fetchedAt,
       lastAttemptAt: now,
+      lastError: String(error?.message || ""),
       budgetDay: today,
       budgetCount: budgetUsed + 1
     });
@@ -996,6 +1133,16 @@ async function fetchWithTimeout(url, options = {}) {
   } catch (error) {
     if (error?.name === "AbortError") {
       throw new Error("Le serveur distant de mise a jour ne repond pas a temps.");
+    }
+    if (error?.message === "fetch failed") {
+      const cause = error.cause?.code || error.cause?.message || "erreur reseau";
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch {
+        // URL deja validee par fetch : sans importance.
+      }
+      throw new Error(`Serveur de mise a jour injoignable${host ? ` (${host})` : ""} : ${cause}.`);
     }
 
     throw error;
@@ -1515,7 +1662,22 @@ async function restartApplicationStack(config) {
     }
   }
 
-  await runCompose(["up", "-d", "--build", ...immediate]);
+  // Reconstruction retentee : un echec ponctuel (registre Docker lent, coupure
+  // reseau, cache de build) ne doit pas declencher un retour arriere complet.
+  const composeAttempts = Math.max(1, Number(process.env.UPDATE_COMPOSE_ATTEMPTS || 3));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await runCompose(["up", "-d", "--build", ...immediate]);
+      break;
+    } catch (error) {
+      // Un depassement du delai maximal n'est pas rejoue (il durerait autant).
+      if (attempt >= composeAttempts || /interrompu après/.test(error.message)) {
+        throw error;
+      }
+      pushLog(`Reconstruction échouée (essai ${attempt}/${composeAttempts}) : ${error.message}. Nouvel essai...`);
+      await sleep(attempt * 15000);
+    }
+  }
   setState({ progress: 88, message: "Vérification du démarrage des services..." });
   await waitForBackendHealthy();
   return { includesUpdater };
@@ -1528,22 +1690,71 @@ async function restartApplicationStack(config) {
 // donc confiee a un conteneur auxiliaire ephemere, hors du projet compose,
 // lance depuis la meme image (docker CLI + compose). Compose ne recree
 // l'updater que si son image ou sa configuration a change.
+// Script du conteneur auxiliaire : reconstruit l'updater (essais multiples),
+// puis GARANTIT qu'un conteneur updater tourne a la fin, quoi qu'il arrive :
+// si la reconstruction echoue (reseau, proxy, registre), l'ancienne image est
+// relancee ; si le nouveau conteneur reste bloque a l'etat "Created", il est
+// demarre explicitement.
+const UPDATER_REBUILD_SCRIPT = `
+sleep 5
+if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+COMPOSE="$DC -p $UPDATE_PROJECT_NAME -f /workspace/docker-compose.yml"
+built=0
+for attempt in 1 2 3; do
+  echo "[rebuild] essai $attempt : reconstruction de l'updater"
+  if $COMPOSE up -d --build updater; then built=1; break; fi
+  sleep $((attempt * 15))
+done
+if [ "$built" != 1 ]; then
+  echo "[rebuild] reconstruction impossible : relance de l'image existante"
+  $COMPOSE up -d --no-build updater || true
+fi
+for i in $(seq 1 60); do
+  cid="$($COMPOSE ps -a -q updater 2>/dev/null | head -n 1)"
+  [ -z "$cid" ] && cid="$UPDATER_CONTAINER_NAME"
+  state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo absent)"
+  if [ "$state" = "running" ]; then echo "[rebuild] updater actif"; exit 0; fi
+  if [ "$state" = "created" ] || [ "$state" = "exited" ]; then docker start "$cid" || true; fi
+  if [ "$state" = "absent" ] && [ $((i % 10)) -eq 0 ]; then $COMPOSE up -d --no-build updater || true; fi
+  sleep 3
+done
+echo "[rebuild] l'updater n'a pas pu etre relance"
+exit 1
+`;
+
+// L'updater ne peut pas se recreer lui-meme : "docker compose up" arrete
+// l'ancien conteneur AVANT de demarrer le nouveau, ce qui tue la commande
+// compose lancee depuis ce conteneur et laisse l'updater arrete (verifie : le
+// nouveau conteneur reste bloque a l'etat "Created"). La reconstruction est
+// donc confiee a un conteneur auxiliaire ephemere, hors du projet compose,
+// lance depuis la meme image (docker CLI + compose). Compose ne recree
+// l'updater que si son image ou sa configuration a change.
 async function scheduleUpdaterSelfRebuild() {
   const helperName = `${composeProjectName}-updater-rebuild`;
   try {
     const hostWorkspaceDir = await getHostWorkspaceDir();
-    const selfId = String(process.env.HOSTNAME || "").trim();
-    if (!selfId || (!hostWorkspaceDirOverride && hostWorkspaceDir === workspaceDir)) {
+    if (!hostWorkspaceDir || hostWorkspaceDir === workspaceDir) {
       throw new Error("dossier du projet sur l'hôte introuvable");
     }
 
-    const image = (
-      await runProcess("docker", ["inspect", selfId, "--format", "{{.Image}}"], { logOutput: false, timeoutMs: 30000 })
-    ).trim();
+    const image = await inspectSelf("{{.Image}}");
+    if (!image) {
+      throw new Error("image du service de mise à jour introuvable");
+    }
+    const hostSocketPath = await getHostDockerSocketPath();
     await runProcess("docker", ["rm", "-f", helperName], { logOutput: false, timeoutMs: 30000 }).catch(() => {});
 
-    const composeArgs = '-p "$UPDATE_PROJECT_NAME" -f /workspace/docker-compose.yml up -d --build updater';
-    const proxyEnv = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+    // Variables transmises au conteneur auxiliaire : proxy, et celles que
+    // docker-compose.yml interpole (sinon compose les relit depuis .env).
+    const forwardedEnv = [
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "DOCKER_SOCKET_PATH"
+    ]
       .filter((key) => process.env[key])
       .flatMap((key) => ["-e", `${key}=${process.env[key]}`]);
 
@@ -1556,28 +1767,32 @@ async function scheduleUpdaterSelfRebuild() {
         "-d",
         "--name",
         helperName,
+        "--restart",
+        "on-failure:3",
         "-v",
-        "/var/run/docker.sock:/var/run/docker.sock",
+        `${hostSocketPath}:/var/run/docker.sock`,
         "-v",
         `${hostWorkspaceDir}:/workspace`,
         "-w",
         "/workspace",
         "-e",
+        "DOCKER_HOST=unix:///var/run/docker.sock",
+        "-e",
         `PROJECT_WORKSPACE_DIR=${hostWorkspaceDir}`,
         "-e",
         `UPDATE_PROJECT_NAME=${composeProjectName}`,
         "-e",
+        "UPDATER_CONTAINER_NAME=assistant-ia-updater",
+        "-e",
         "BUILDKIT_PROGRESS=plain",
         "-e",
         "COMPOSE_PROGRESS=plain",
-        ...proxyEnv,
+        ...forwardedEnv,
         "--entrypoint",
         "sh",
         image,
         "-c",
-        // Courte pause : laisse l'interface lire l'etat final avant le
-        // remplacement du conteneur (l'etat est de toute facon persiste).
-        `sleep 5; docker compose ${composeArgs} || docker-compose ${composeArgs}`
+        UPDATER_REBUILD_SCRIPT
       ],
       { logOutput: false, timeoutMs: 60000 }
     );
@@ -1611,6 +1826,39 @@ async function fetchCachedRemoteReleaseInfo() {
   return fetchRemoteReleaseInfo();
 }
 
+// Variante bornee dans le temps pour /status : une source distante lente
+// (proxy, GitHub qui rame) ne doit jamais faire depasser au statut le delai
+// d'attente du backend, qui conclurait alors a tort que le service de mise a
+// jour est indisponible. La verification continue en arriere-plan et son
+// resultat (mis en cache) sert aux appels suivants.
+async function fetchRemoteReleaseInfoForStatus() {
+  const pending = Symbol("pending");
+  const remote = fetchCachedRemoteReleaseInfo();
+  remote.catch(() => undefined);
+  let timer = null;
+  const result = await Promise.race([
+    remote,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(pending), statusRemoteWaitMs);
+    })
+  ]).finally(() => clearTimeout(timer));
+
+  if (result !== pending) {
+    return result;
+  }
+
+  const cache = await loadPersistentReleaseCache();
+  if (Array.isArray(cache?.releases) && cache.releases.length > 0) {
+    return {
+      release: cache.releases[0],
+      config: await readUpdateConfig(),
+      stale: true,
+      budget: { used: cache.budgetCount, max: githubMaxCallsPerDay, day: cache.budgetDay }
+    };
+  }
+  throw new Error("Vérification des mises à jour en cours, réessayez dans quelques secondes.");
+}
+
 // Appelee au lancement d'une mise a jour / d'un rollback. Ne force PAS de
 // nouvel appel a l'API distante (ce serait exploitable par le polling 2,5 s de
 // l'overlay) : on invalide seulement la fraicheur pour que le prochain creneau
@@ -1637,7 +1885,7 @@ async function buildStatus() {
   try {
     const updateConfig = await readUpdateConfig();
     latestReleaseUrl = String(updateConfig?.server?.latestReleaseUrl || "").trim();
-    const { release, stale, budget } = await fetchCachedRemoteReleaseInfo();
+    const { release, stale, budget } = await fetchRemoteReleaseInfoForStatus();
     const latestVersion = release.version || currentVersion;
     const updateAvailable = compareVersions(latestVersion, currentVersion) === 1;
     const releaseCheck = {
@@ -2295,8 +2543,22 @@ app.get("/health", async (_req, res) => {
 });
 
 app.get("/status", async (_req, res) => {
-  const payload = await buildStatus();
-  res.json(payload);
+  try {
+    res.json(await buildStatus());
+  } catch (error) {
+    // Jamais de 500 ici : le backend l'interpreterait comme un service de mise
+    // a jour indisponible. On renvoie l'etat courant, avec l'erreur en alerte.
+    res.json({
+      currentVersion: state.currentVersion,
+      latestVersion: state.latestVersion || state.currentVersion,
+      updateAvailable: Boolean(state.updateAvailable),
+      release: null,
+      backups: [],
+      retention: maxBackupVersions,
+      state,
+      warning: error?.message || "Statut partiel."
+    });
+  }
 });
 
 app.get("/releases", async (_req, res) => {
@@ -2439,10 +2701,38 @@ app.post("/export/publish", requireSharedToken, async (req, res) => {
   });
 });
 
-app.listen(port, async () => {
-  await restorePersistedState();
-  setState({ currentVersion: await readVersion() });
+// Une erreur imprevue ne doit jamais laisser l'updater a moitie vivant (port
+// ouvert mais plus rien ne repond) : une promesse rejetee non geree est
+// journalisee sans arreter le service ; une exception non rattrapee arrete le
+// processus apres avoir persiste l'etat, et Docker le relance (restart: always).
+process.on("unhandledRejection", (reason) => {
+  console.error("Promesse rejetee non geree :", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Erreur fatale de l'updater :", error);
+  try {
+    fs.writeFileSync(stateFilePath, JSON.stringify({ ...state, savedAt: new Date().toISOString() }), "utf8");
+  } catch {
+    // Best effort.
+  }
+  process.exit(1);
+});
+
+const server = app.listen(port, async () => {
+  try {
+    await restorePersistedState();
+    setState({ currentVersion: await readVersion() });
+  } catch (error) {
+    console.error(`Restauration de l'etat impossible : ${error.message}`);
+  }
   console.log(`Updater ready on port ${port}`);
   // Repare au demarrage les fichiers laisses a root par une version precedente.
   restoreWorkspaceOwnership().catch(() => undefined);
+  // Prechauffe le cache des versions : le premier affichage de l'onglet Mises
+  // a jour n'a alors plus a attendre la source distante.
+  getRemoteReleasesRateLimited().catch(() => undefined);
+});
+server.on("error", (error) => {
+  console.error(`Ecoute sur le port ${port} impossible : ${error.message}`);
+  process.exit(1);
 });

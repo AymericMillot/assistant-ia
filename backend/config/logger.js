@@ -6,6 +6,13 @@ const logsDir = path.resolve(process.cwd(), process.env.LOGS_DIR || "./logs");
 fs.mkdirSync(logsDir, { recursive: true });
 
 const maxBufferedLogs = 50;
+// Rotation integree a winston : sans elle, app.log grossissait indefiniment sur
+// un serveur qui tourne des mois. tailable = le fichier courant garde son nom.
+const logFileRotation = {
+  maxsize: Math.max(1, Number(process.env.LOG_MAX_SIZE_MB || 20)) * 1024 * 1024,
+  maxFiles: Math.max(1, Number(process.env.LOG_MAX_FILES || 5)),
+  tailable: true
+};
 const indexationBuffer = [];
 let realtimeEmitter = null;
 const logTimeZone = process.env.LOG_TIMEZONE || "Europe/Paris";
@@ -46,8 +53,8 @@ export const logger = winston.createLogger({
         })
       )
     }),
-    new winston.transports.File({ filename: path.join(logsDir, "app.log") }),
-    new winston.transports.File({ filename: path.join(logsDir, "error.log"), level: "error" })
+    new winston.transports.File({ filename: path.join(logsDir, "app.log"), ...logFileRotation }),
+    new winston.transports.File({ filename: path.join(logsDir, "error.log"), level: "error", ...logFileRotation })
   ]
 });
 
@@ -60,7 +67,7 @@ const indexationLogger = winston.createLogger({
       return `${timestamp} [${level.toUpperCase()}] ${message}${serializedMeta}`;
     })
   ),
-  transports: [new winston.transports.File({ filename: path.join(logsDir, "indexation.log") })]
+  transports: [new winston.transports.File({ filename: path.join(logsDir, "indexation.log"), ...logFileRotation })]
 });
 
 const hydrateBufferFromDisk = () => {
@@ -69,11 +76,30 @@ const hydrateBufferFromDisk = () => {
     return;
   }
 
-  const lines = fs
-    .readFileSync(logFilePath, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .slice(-maxBufferedLogs);
+  // Seule la fin du fichier est utile (50 dernieres lignes) : pas de lecture
+  // complete d'un journal potentiellement volumineux au demarrage.
+  const tailBytes = 128 * 1024;
+  let content = "";
+  let fileHandle = null;
+  try {
+    fileHandle = fs.openSync(logFilePath, "r");
+    const { size } = fs.fstatSync(fileHandle);
+    const start = Math.max(0, size - tailBytes);
+    const buffer = Buffer.alloc(size - start);
+    fs.readSync(fileHandle, buffer, 0, buffer.length, start);
+    content = buffer.toString("utf8");
+    if (start > 0) {
+      content = content.slice(content.indexOf("\n") + 1);
+    }
+  } catch {
+    return;
+  } finally {
+    if (fileHandle !== null) {
+      fs.closeSync(fileHandle);
+    }
+  }
+
+  const lines = content.split("\n").filter(Boolean).slice(-maxBufferedLogs);
 
   lines.forEach((line) => {
     const match = line.match(/^(\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2})/);

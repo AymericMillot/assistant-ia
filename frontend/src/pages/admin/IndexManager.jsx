@@ -294,7 +294,11 @@ export default function IndexManager({ onRefreshSummary }) {
           <div className="mb-3 flex items-center justify-between text-sm text-slate-600">
             <span>
               {status?.isRunning
-                ? `Traitement de ${status.currentFile || "la collection"}`
+                ? `Traitement de ${status.currentFile || "la collection"}${
+                    status.currentDocumentVisionPages
+                      ? ` — analyse des images (page ${status.currentDocumentVisionPages})`
+                      : ""
+                  }`
                 : status?.isPaused
                   ? "Indexation en pause"
                 : status?.isPending
@@ -371,8 +375,11 @@ export default function IndexManager({ onRefreshSummary }) {
                       </span>
 	                    </div>
                       <div className="mt-2 text-xs text-slate-500">
-                        Chunks créés {entry.chunkCount ?? 0}
-                        {entry.totalChunks > 0 ? ` / ${entry.totalChunks}` : ""}
+                        {entry.stage === "vision"
+                          ? `Analyse des images par le modèle de vision : ${entry.visionPagesProcessed ?? 0} / ${
+                              entry.visionPagesTotal ?? 0
+                            } page(s)`
+                          : `Chunks créés ${entry.chunkCount ?? 0}${entry.totalChunks > 0 ? ` / ${entry.totalChunks}` : ""}`}
                       </div>
 	                  </div>
 	                ))}

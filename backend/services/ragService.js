@@ -8,7 +8,9 @@ import { load as loadHtml } from "cheerio";
 import { Chroma } from "@langchain/community/vectorstores/chroma";
 import { Document } from "@langchain/core/documents";
 import { OllamaEmbeddings } from "@langchain/ollama";
-import { generateChatAnswer, getActiveModel, getModelContextLength } from "./ollamaService.js";
+import { generateChatAnswer, getActiveModel, getModelProfile } from "./ollamaService.js";
+import { analyzePdfVisualContent, computeFileHash, readPdfPages } from "./pdfVisionService.js";
+import { fitMessagesToContext } from "./contextBudget.js";
 import { TokenTextSplitter } from "@langchain/textsplitters";
 import { ChromaClient } from "chromadb";
 import mammoth from "mammoth";
@@ -20,13 +22,16 @@ import {
   getDocuments,
   getManualResources,
   getSetting,
-  insertRetrievalScoreLog
+  insertRetrievalScoreLog,
+  pruneVisualDescriptions,
+  setDocumentVisualPageCount
 } from "../config/db.js";
 import { getBranding } from "../config/branding.js";
 import { logger } from "../config/logger.js";
 import { getAbsoluteDocumentPath, listFolders, syncFilesystemToDatabase } from "./fileService.js";
 import { getFeedbackById, getRelevantImprovementRules } from "./feedbackService.js";
 import { getRatingSignalsForQuestion } from "./ratingService.js";
+import { selectSkillsForQuestion } from "./skillService.js";
 
 // Collections dediees hors dossiers documentaires : liens web scrapes, pieces
 // jointes utilisateur et corrections validees par un referent (boucle de retour).
@@ -39,6 +44,8 @@ const correctionsFolderKey = "_corrections";
 const queryExpansionEnabled =
   String(process.env.RAG_QUERY_EXPANSION_ENABLED || "true").toLowerCase() !== "false";
 const queryExpansionMax = Math.max(0, Number(process.env.RAG_QUERY_EXPANSION_MAX || 4));
+const queryExpansionMaxTokens = Math.max(32, Number(process.env.RAG_QUERY_EXPANSION_MAX_TOKENS || 160));
+const queryExpansionTimeoutMs = Math.max(1000, Number(process.env.RAG_QUERY_EXPANSION_TIMEOUT_MS || 10000));
 const queryExpansionCache = new Map();
 
 const chromaUrl = new URL(process.env.CHROMA_URL || "http://localhost:8000");
@@ -51,10 +58,24 @@ const minimumVectorRelevanceScore = Number(process.env.MIN_VECTOR_RELEVANCE_SCOR
 const minimumManualOverlapScore = Number(process.env.MIN_MANUAL_OVERLAP_SCORE || 0.08);
 const minimumDocumentOverlapScore = Number(process.env.MIN_DOCUMENT_OVERLAP_SCORE || 0.08);
 const ragTopK = Number(process.env.RAG_TOP_K || 6);
-const defaultConversationHistoryLimit = Number(process.env.CHAT_HISTORY_LIMIT || 10);
-const maxConversationCharacters = Number(process.env.CHAT_HISTORY_MAX_CHARACTERS || 12000);
+// Nombre maximal de messages repris mot pour mot dans le prompt ; les echanges
+// plus anciens sont condenses (voir contextBudget.js). Le budget reel depend de
+// la fenetre de contexte du modele utilise.
+const defaultConversationHistoryLimit = Number(process.env.CHAT_HISTORY_LIMIT || 20);
 const maxChunksPerDocument = Number(process.env.RAG_MAX_CHUNKS_PER_DOCUMENT || 3);
 const maxContextCharacters = Number(process.env.RAG_MAX_CONTEXT_CHARACTERS || 7000);
+// Les reglages RAG ci-dessus valent pour une fenetre de 8k tokens ; un modele a
+// grande fenetre recoit proportionnellement plus d'extraits (jusqu'a x3).
+const referenceContextWindow = 8192;
+
+export function getRetrievalSizing(contextWindow = null) {
+  const scale = Math.min(3, Math.max(1, (Number(contextWindow) || referenceContextWindow) / referenceContextWindow));
+  return {
+    topK: Math.round(ragTopK * scale),
+    maxChunksPerDocument: maxChunksPerDocument + (scale >= 2 ? 1 : 0),
+    maxContextCharacters: Math.round(maxContextCharacters * scale)
+  };
+}
 const maxManualResourcesInPrompt = Number(process.env.MANUAL_RESOURCE_PROMPT_LIMIT || 4);
 const maxDocumentLinksInPrompt = Number(process.env.DOCUMENT_LINK_PROMPT_LIMIT || 4);
 const maxEmbeddingChunkCharacters = Number(process.env.RAG_MAX_EMBEDDING_CHUNK_CHARACTERS || 1200);
@@ -105,7 +126,10 @@ function getEmbeddings() {
 
   embeddingsInstance = new OllamaEmbeddings({
     model: embeddingModel,
-    baseUrl: process.env.OLLAMA_URL || "http://localhost:11434"
+    baseUrl: process.env.OLLAMA_URL || "http://localhost:11434",
+    // Par defaut LangChain reessaie 6 fois avec un delai exponentiel : une
+    // question restait bloquee pres d'une minute quand Ollama etait arrete.
+    maxRetries: Math.max(0, Number(process.env.RAG_EMBEDDING_MAX_RETRIES ?? 2))
   });
   if (embeddingsInstanceModel && embeddingsInstanceModel !== embeddingModel) {
     vectorStoreCache.clear();
@@ -164,7 +188,23 @@ async function getCollection(folderName) {
     embeddingFunction: getChromaEmbeddingFunction()
   });
   collectionCache.set(collectionName, collectionPromise);
+  // Une promesse rejetee (ChromaDB pas encore pret au demarrage, redemarre...)
+  // ne doit pas rester en cache : sinon toute recherche sur cette collection
+  // echouerait jusqu'au redemarrage du backend.
+  collectionPromise.catch(() => {
+    if (collectionCache.get(collectionName) === collectionPromise) {
+      collectionCache.delete(collectionName);
+    }
+  });
   return collectionPromise;
+}
+
+// Collection supprimee ou recreee cote ChromaDB (reinitialisation, restauration) :
+// l'objet en cache pointe vers un identifiant perime, on le recharge au prochain appel.
+function forgetCollection(folderName) {
+  const collectionName = getCollectionName(folderName);
+  collectionCache.delete(collectionName);
+  vectorStoreCache.delete(collectionName);
 }
 
 async function deleteCollectionIfExists(folderName) {
@@ -294,7 +334,9 @@ async function readPdfWithPdfParse(absolutePath) {
       originalConsoleError(...args);
     };
     const payload = await parser.getText();
-    return payload.text;
+    // Marqueurs de page ajoutes par pdf-parse ("-- 2 of 9 --") : du bruit pour
+    // la recherche, et ils feraient passer un PDF scanne pour un PDF avec texte.
+    return String(payload.text || "").replace(/^[ \t]*-- \d+ of \d+ --[ \t]*$/gm, "");
   } finally {
     console.error = originalConsoleError;
     await parser.destroy().catch(() => {});
@@ -653,6 +695,113 @@ export async function buildIndexableChunks(text) {
   return chunks;
 }
 
+function firstMeaningfulLine(text, maxCharacters = 160) {
+  const line = String(text || "")
+    .split("\n")
+    .map((entry) => entry.replace(/\s+/g, " ").trim())
+    .find((entry) => entry.length >= 4);
+  if (!line) {
+    return "";
+  }
+  return line.length > maxCharacters ? `${line.slice(0, maxCharacters - 1).trimEnd()}…` : line;
+}
+
+/**
+ * Extraits issus des descriptions visuelles (modele de vision). Chaque morceau
+ * repete un en-tete (document, page, titre de la page) : un extrait retrouve
+ * seul par la recherche reste comprehensible et rattache a sa page.
+ */
+export async function buildVisualChunkEntries(sections = [], { documentLabel = "" } = {}) {
+  const splitter = new TokenTextSplitter({ chunkSize: 450, chunkOverlap: 40 });
+  const entries = [];
+
+  for (const section of sections) {
+    const pageTitle = firstMeaningfulLine(section.pageText);
+    const header = [
+      `[Contenu visuel — page ${section.pageNumber}${documentLabel ? ` du document « ${documentLabel} »` : ""}]`,
+      pageTitle ? `Contexte de la page : ${pageTitle}` : ""
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const budget = Math.max(300, maxEmbeddingChunkCharacters - header.length - 2);
+    const pieces = (await splitter.splitText(normalizeExtractedText(section.content)))
+      .map((piece) => normalizeExtractedText(piece))
+      .filter(Boolean)
+      .flatMap((piece) => splitChunkByCharacters(piece, budget, embeddingChunkCharacterOverlap));
+
+    pieces.forEach((piece) => {
+      entries.push({
+        content: `${header}\n${piece}`,
+        kind: "visual",
+        pageNumber: section.pageNumber
+      });
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Lit un document pour l'indexer. Pour un PDF, ajoute au texte les descriptions
+ * du contenu visuel (images, schemas, pages scannees) produites par le modele
+ * de vision. `visionMode` : "full" (indexation) ou "cache-only" (apercu).
+ */
+async function extractDocumentForIndexing(absolutePath, documentRecord, { visionMode = "full", shouldAbort, beforeVisionPage, onVisionProgress } = {}) {
+  const extension = path.extname(absolutePath).toLowerCase();
+  let text = "";
+  let textError = null;
+
+  try {
+    text = await readFileContent(absolutePath);
+  } catch (error) {
+    // Un PDF scanne peut echouer a l'extraction texte mais rester lisible par
+    // le modele de vision.
+    if (extension !== ".pdf") {
+      throw error;
+    }
+    textError = error;
+  }
+
+  if (extension !== ".pdf") {
+    return { text, visualEntries: [], vision: null };
+  }
+
+  let vision = null;
+  try {
+    const pages = await readPdfPages(absolutePath).catch(() => null);
+    vision = await analyzePdfVisualContent(absolutePath, {
+      documentLabel: documentRecord.originalName || documentRecord.filename,
+      // Hash recalcule sur le fichier : celui de la base peut dater d'avant une
+      // modification, et des descriptions d'une autre version seraient reprises.
+      fileHash: await computeFileHash(absolutePath),
+      pages: pages && pages.length > 0 ? pages : null,
+      mode: visionMode,
+      shouldAbort,
+      beforePage: beforeVisionPage,
+      onProgress: onVisionProgress
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw error;
+    }
+    // La vision est un enrichissement : son echec ne bloque jamais l'indexation du texte.
+    logger.warn("Analyse visuelle du PDF ignoree.", {
+      relativePath: documentRecord.relativePath,
+      message: error.message
+    });
+  }
+
+  const visualEntries = await buildVisualChunkEntries(vision?.sections || [], {
+    documentLabel: documentRecord.originalName || documentRecord.filename
+  });
+
+  if (textError && visualEntries.length === 0) {
+    throw textError;
+  }
+
+  return { text, visualEntries, vision };
+}
+
 function isIdentityQuestion(question) {
   const normalized = normalizeIntentText(question);
   return /\b(qui es[- ]?tu|qui tu es|presente[- ]?toi|ton role|comment tu t'appelles|tu t'appelles comment|c'est quoi ton nom|quel est ton nom|ton nom|nom officiel|comment t'appelles[- ]tu)\b/.test(
@@ -709,6 +858,34 @@ function isShortFollowUpQuestion(question) {
   return normalized.split(" ").length <= 6 && /^(et |mais |alors |donc |pourquoi|comment|precise|explique|developpe|detaille|dans ce cas)/.test(normalized);
 }
 
+// Question qui ne se comprend qu'avec la conversation : renvoi a une reponse
+// precedente, a une information donnee plus tot par l'utilisateur, pronom en
+// tete de question courte ("elle consomme combien ?"), demande de reformulation.
+export function isConversationReferenceQuestion(question) {
+  const normalized = normalizeIntentText(question).replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    /\b(tu (m'as|m'avais|as|avais) (dit|ecrit|repondu|parle|explique|indique|propose|cite)|ta (derniere |precedente )?reponse|tes reponses|ce que (tu|j'ai|je t'ai|on a|nous avons)|on (a|en a|avait) (dit|parle|vu)|plus haut|precedemment|auparavant|tout a l'heure|juste avant|ci-dessus|au debut de (la|notre) (conversation|discussion)|reformul|resum|recapitul|tradui|reprend|repet|redi[st]|rappelle[- ]moi|mon (nom|prenom|projet|groupe)|je m'appelle|comment je m'appelle|qui suis[- ]je|(la|le|les) (premiere?|deuxieme|seconde?|troisieme|quatrieme|derniere?|precedente?|meme|autre) (etape|point|methode|solution|option|question|machine|piece|reponse|idee)|(etape|point|option|solution) (n ?°? ?)?\d+|celle-ci|celui-ci|celle-la|celui-la|ceux-ci|celles-ci|la meme chose|pareil)/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    normalized.split(" ").length <= 12 &&
+    /^(et |mais |du coup |alors |sinon |ok |d'accord |il |elle |ils |elles |ca |c'est |cette |ces |celui |celle |y a-t-il |en |sur ce|a ce sujet|dans ce)/.test(normalized)
+  );
+}
+
+// Question de suivi au sens large : relance courte ou renvoi a la conversation.
+function isContextDependentQuestion(question) {
+  return isShortFollowUpQuestion(question) || isConversationReferenceQuestion(question);
+}
+
 function isDocumentAccessRequest(question) {
   const normalized = normalizeIntentText(question).replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -750,7 +927,31 @@ function normalizeDocumentName(value) {
   return normalizeIntentText(value).replace(/[^a-z0-9.]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// Recalcule pour chaque document a chaque question (recherche d'un document
+// cite) : les noms changent rarement, le resultat est donc memorise.
+const documentReferenceCandidatesCache = new Map();
+
 function buildDocumentReferenceCandidates(document) {
+  const cacheKey = [
+    document.original_name,
+    document.filename,
+    document.relative_path,
+    document.folder_name
+  ].join("\u0000");
+  const cached = documentReferenceCandidatesCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const candidates = computeDocumentReferenceCandidates(document);
+  if (documentReferenceCandidatesCache.size >= 5000) {
+    documentReferenceCandidatesCache.clear();
+  }
+  documentReferenceCandidatesCache.set(cacheKey, candidates);
+  return candidates;
+}
+
+function computeDocumentReferenceCandidates(document) {
   const rawCandidates = [
     document.original_name,
     document.filename,
@@ -1001,118 +1202,117 @@ function findRequestedDocumentGroup(question) {
   };
 }
 
+// Constantes hors des fonctions : le scoring lexical tourne pour chaque extrait
+// candidat et chaque document a chaque question (l'ensemble etait auparavant
+// reconstruit pour chaque mot).
+const frenchStopWords = new Set([
+  "les",
+  "des",
+  "une",
+  "pour",
+  "dans",
+  "avec",
+  "sans",
+  "sur",
+  "qui",
+  "quoi",
+  "comment",
+  "quand",
+  "vous",
+  "nous",
+  "elle",
+  "elles",
+  "ils",
+  "est",
+  "sont",
+  "pas",
+  "plus",
+  "par",
+  "que",
+  "aux",
+  "ses",
+  "ces",
+  "cet",
+  "cette",
+  "avant",
+  "apres",
+  "faire",
+  "donc"
+]);
+
 function tokenizeFrenchText(value) {
   return String(value || "")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .split(/[^a-z0-9]+/)
-    .filter(Boolean)
-    .filter((token) => token.length > 2)
-    .filter(
-      (token) =>
-        !new Set([
-          "les",
-          "des",
-          "une",
-          "pour",
-          "dans",
-          "avec",
-          "sans",
-          "sur",
-          "qui",
-          "quoi",
-          "comment",
-          "quand",
-          "vous",
-          "nous",
-          "elle",
-          "elles",
-          "ils",
-          "est",
-          "sont",
-          "pas",
-          "plus",
-          "par",
-          "que",
-          "aux",
-          "ses",
-          "ces",
-          "cet",
-          "cette",
-          "avant",
-          "apres",
-          "faire",
-          "dans",
-          "donc"
-        ]).has(token)
-    );
+    .filter((token) => token.length > 2 && !frenchStopWords.has(token));
 }
+
+const frenchStemSuffixes = [
+  "issements",
+  "issement",
+  "atrices",
+  "ateurs",
+  "ations",
+  "ation",
+  "utions",
+  "ution",
+  "ements",
+  "ement",
+  "tions",
+  "tion",
+  "sions",
+  "sion",
+  "ences",
+  "ence",
+  "ances",
+  "ance",
+  "iques",
+  "ique",
+  "ismes",
+  "isme",
+  "istes",
+  "iste",
+  "euses",
+  "euse",
+  "trices",
+  "trice",
+  "teurs",
+  "teur",
+  "ments",
+  "ment",
+  "ages",
+  "age",
+  "eurs",
+  "eaux",
+  "eau",
+  "ures",
+  "ure",
+  "ives",
+  "ive",
+  "ifs",
+  "if",
+  "ions",
+  "ion",
+  "ees",
+  "ee",
+  "ers",
+  "er",
+  "ez",
+  "es",
+  "e",
+  "s"
+];
 
 function normalizeFrenchStem(token) {
   let normalized = String(token || "")
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[̀-ͯ]/g, "")
     .replace(/[^a-z0-9]/g, "");
 
-  const suffixes = [
-    "issements",
-    "issement",
-    "atrices",
-    "ateurs",
-    "ations",
-    "ation",
-    "utions",
-    "ution",
-    "ements",
-    "ement",
-    "tions",
-    "tion",
-    "sions",
-    "sion",
-    "ences",
-    "ence",
-    "ances",
-    "ance",
-    "iques",
-    "ique",
-    "ismes",
-    "isme",
-    "istes",
-    "iste",
-    "euses",
-    "euse",
-    "trices",
-    "trice",
-    "teurs",
-    "teur",
-    "ments",
-    "ment",
-    "ages",
-    "age",
-    "eurs",
-    "eaux",
-    "eau",
-    "ures",
-    "ure",
-    "ives",
-    "ive",
-    "ifs",
-    "if",
-    "ions",
-    "ion",
-    "ees",
-    "ee",
-    "ers",
-    "er",
-    "ez",
-    "es",
-    "e",
-    "s"
-  ];
-
-  for (const suffix of suffixes) {
+  for (const suffix of frenchStemSuffixes) {
     if (normalized.endsWith(suffix) && normalized.length - suffix.length >= 4) {
       normalized = normalized.slice(0, -suffix.length);
       break;
@@ -1122,16 +1322,38 @@ function normalizeFrenchStem(token) {
   return normalized;
 }
 
+// Les memes textes courts (question, noms de documents) sont tokenises des
+// centaines de fois par question : petit cache, ensembles en lecture seule.
+const tokenSetCache = new Map();
+const tokenSetCacheMaxEntries = 2000;
+const tokenSetCacheMaxLength = 400;
+
 function buildTokenSet(value) {
-  return new Set(tokenizeFrenchText(value).map(normalizeFrenchStem).filter((token) => token.length >= 4));
+  const text = String(value || "");
+  const cacheable = text.length <= tokenSetCacheMaxLength;
+  if (cacheable) {
+    const cached = tokenSetCache.get(text);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const tokens = new Set(tokenizeFrenchText(text).map(normalizeFrenchStem).filter((token) => token.length >= 4));
+  if (cacheable) {
+    if (tokenSetCache.size >= tokenSetCacheMaxEntries) {
+      tokenSetCache.clear();
+    }
+    tokenSetCache.set(text, tokens);
+  }
+  return tokens;
 }
 
 function computeDomainKeywordScore(question, history = []) {
   const { lastUserMessage, lastAssistantMessage } = getConversationAnchors(history);
   const scopedText = [
     question,
-    isShortFollowUpQuestion(question) ? lastUserMessage?.content || "" : "",
-    isShortFollowUpQuestion(question) ? lastAssistantMessage?.content || "" : ""
+    isContextDependentQuestion(question) ? lastUserMessage?.content || "" : "",
+    isContextDependentQuestion(question) ? lastAssistantMessage?.content || "" : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -1164,7 +1386,7 @@ function computeProjectFocusScore(question, retrieval, history = []) {
       ? Math.min(0.7, 0.35 + Number(retrieval.averagePriorityScore || 0) * 0.7)
       : 0;
   const followUpScore =
-    isShortFollowUpQuestion(question) && getConversationAnchors(history).lastAssistantMessage
+    isContextDependentQuestion(question) && getConversationAnchors(history).lastAssistantMessage
       ? 0.18
       : 0;
 
@@ -1198,7 +1420,7 @@ function hasApproximateTokenMatch(sourceToken, candidateTokens) {
   return false;
 }
 
-function computeTextOverlapScore(question, text) {
+export function computeTextOverlapScore(question, text) {
   const questionTokens = buildTokenSet(question);
   if (questionTokens.size === 0) {
     return 0;
@@ -1260,8 +1482,10 @@ function computeExactDocumentMentionBonus(question, result) {
   return 0;
 }
 
-function computeManualPriorityScore(question, resource, explicitProfileQuestion) {
-  const overlapScore = explicitProfileQuestion ? 1 : computeManualOverlapScore(question, resource);
+function computeManualPriorityScore(question, resource, explicitProfileQuestion, manualOverlapScore = null) {
+  const overlapScore = explicitProfileQuestion
+    ? 1
+    : manualOverlapScore ?? computeManualOverlapScore(question, resource);
   const exactDirectiveBonus = /reponds? exactement|utilise exactement|nom officiel|appelle[- ]toi/i.test(
     String(resource.content || "")
   )
@@ -1279,20 +1503,21 @@ function prioritizeManualResources(
   limit = maxManualResourcesInPrompt
 ) {
   return resources
-    .map((resource) => ({
-      ...resource,
-      overlapScore: computeManualOverlapScore(question, resource),
-      priorityScore: computeManualPriorityScore(question, resource, explicitProfileQuestion),
-      isQuestionRelevant:
-        explicitProfileQuestion ||
-        computeManualPriorityScore(question, resource, explicitProfileQuestion) >=
-          minimumManualOverlapScore
-    }))
+    .map((resource) => {
+      const overlapScore = computeManualOverlapScore(question, resource);
+      const priorityScore = computeManualPriorityScore(question, resource, explicitProfileQuestion, overlapScore);
+      return {
+        ...resource,
+        overlapScore,
+        priorityScore,
+        isQuestionRelevant: explicitProfileQuestion || priorityScore >= minimumManualOverlapScore
+      };
+    })
     .sort((left, right) => right.priorityScore - left.priorityScore)
     .slice(0, Math.max(1, limit));
 }
 
-function prioritizeDocumentChunks(question, candidates) {
+function prioritizeDocumentChunks(question, candidates, sizing = getRetrievalSizing()) {
   const perDocumentCounts = new Map();
 
   return candidates
@@ -1331,17 +1556,17 @@ function prioritizeDocumentChunks(question, candidates) {
       const documentKey = result.metadata.source_path || `${result.metadata.folder}-${result.metadata.file_name}`;
       const currentCount = perDocumentCounts.get(documentKey) || 0;
 
-      if (currentCount >= maxChunksPerDocument) {
+      if (currentCount >= sizing.maxChunksPerDocument) {
         return false;
       }
 
       perDocumentCounts.set(documentKey, currentCount + 1);
       return true;
     })
-    .slice(0, ragTopK);
+    .slice(0, sizing.topK);
 }
 
-function buildContextString(chunks) {
+function buildContextString(chunks, sizing = getRetrievalSizing()) {
   let currentLength = 0;
   const sections = [];
 
@@ -1350,7 +1575,7 @@ function buildContextString(chunks) {
       result.metadata.original_name || result.metadata.file_name
     }\nPriorite : ${result.priorityScore}\nExtrait :\n${result.pageContent}`;
 
-    if (sections.length > 0 && currentLength + section.length > maxContextCharacters) {
+    if (sections.length > 0 && currentLength + section.length > sizing.maxContextCharacters) {
       return;
     }
 
@@ -1418,7 +1643,7 @@ function buildRetrievalFocusQuestion(question, history = []) {
     return [previousUserQuestion, previousAssistantAnswer].filter(Boolean).join("\n");
   }
 
-  if (isShortFollowUpQuestion(baseQuestion) && previousUserQuestion) {
+  if (isContextDependentQuestion(baseQuestion) && previousUserQuestion) {
     return [baseQuestion, previousUserQuestion, previousAssistantAnswer.slice(0, 1200)]
       .filter(Boolean)
       .join("\n");
@@ -1428,7 +1653,7 @@ function buildRetrievalFocusQuestion(question, history = []) {
 }
 
 function buildRetrievalQuery(question, history = []) {
-  const shortFollowUpQuestion = isShortFollowUpQuestion(question);
+  const shortFollowUpQuestion = isContextDependentQuestion(question);
   const sourceOnlyRequest = isSourceOnlyRequest(question);
   const { lastUserMessage, lastAssistantMessage } = getConversationAnchors(history);
   const retrievalParts = [question.trim()];
@@ -1463,6 +1688,11 @@ async function expandRetrievalQueries(question) {
   let variants = [];
   try {
     const { text } = await generateChatAnswer({
+      // Quelques lignes suffisent : sans plafond ni delai, un modele lent ou
+      // "raisonneur" retardait chaque reponse de plusieurs dizaines de secondes.
+      maxTokens: queryExpansionMaxTokens,
+      disableThinking: true,
+      signal: AbortSignal.timeout(queryExpansionTimeoutMs),
       messages: [
         {
           role: "system",
@@ -1483,8 +1713,10 @@ async function expandRetrievalQueries(question) {
       .filter((line) => line.toLowerCase() !== baseQuestion.toLowerCase());
     variants = [...new Set(variants)].slice(0, queryExpansionMax);
   } catch (error) {
+    // Echec ponctuel (delai depasse, Ollama occupe) : pas de mise en cache, la
+    // meme question pourra etre reformulee la prochaine fois.
     logger.warn("Expansion de requete ignoree.", { message: error.message });
-    variants = [];
+    return [];
   }
 
   if (queryExpansionCache.size > 200) {
@@ -1517,7 +1749,7 @@ function dedupeRetrievalCandidates(candidates) {
 }
 
 function shouldCarryConversationHistory(question, history = []) {
-  if (isShortFollowUpQuestion(question) || isSourceOnlyRequest(question)) {
+  if (isContextDependentQuestion(question) || isSourceOnlyRequest(question)) {
     return true;
   }
 
@@ -1550,13 +1782,15 @@ Quand tu reponds surtout avec ta connaissance generale faute de contexte interne
 Si la question est dans le domaine mais que tu n'as pas assez d'informations fiables, dis clairement que tu ne sais pas, invite a verifier aupres d'un professeur, d'un responsable d'atelier ou d'une personne competente, et propose a l'utilisateur de completer par une recherche sur Internet.
 Si le contexte interne contredit une connaissance generale, privilegie toujours le contexte interne pour ce sujet precis.
 N'invente pas de fait specifique aux documents internes quand il n'est pas present dans les extraits fournis.
-Tu peux combiner connaissance generale et contexte interne si c'est utile, en restant clair sur ce qui vient surtout des documents internes et des personnalisations.
+Tu peux combiner connaissance generale et contexte interne si c'est utile ; en cas de doute ou de divergence, c'est le contexte interne qui fait foi.
+Pour tout ce qui touche a la securite (machines, materiaux, produits, electricite), ne donne jamais une consigne qui contredit les documents internes, et en l'absence d'information interne fiable, recommande de verifier aupres d'un responsable avant d'agir.
 Ne commence jamais ta reponse par une presentation de toi-meme, ton role ou ton identite, sauf si l'utilisateur te le demande explicitement.
 Ne cite pas les noms de fichiers ni les labels techniques dans le corps de la reponse, sauf si l'utilisateur le demande explicitement.
 Ne termine pas la reponse par une liste de sources : l'interface s'en charge.
 Reponds toujours en francais, meme si la question est posee dans une autre langue.
+Ecris toujours avec les accents et la ponctuation du francais correct, meme si ces consignes en sont depourvues.
 N'utilise pas l'anglais sauf pour un terme technique indispensable ou un nom propre.
-${carriesHistory ? "L'historique recent est pertinent pour cette reponse : tu peux t'y appuyer." : "Traite la question actuelle comme un nouveau sujet autonome. N'herite pas du theme des echanges precedents si la question actuelle change de sujet."}
+${carriesHistory ? "L'historique de la conversation est pertinent pour cette reponse : appuie-toi dessus (informations donnees par l'utilisateur, reponses precedentes) et reste coherent avec ce que tu as deja dit." : "Traite la question actuelle comme un nouveau sujet autonome : n'herite pas du theme des echanges precedents. Un resume de la conversation peut etre fourni pour memoire ; ne t'en sers que si la question y fait reference."}
 ${hasInternalContext ? "Des informations internes pertinentes sont fournies ci-dessous : base-toi d'abord sur elles pour cadrer la reponse." : "Aucun contexte interne suffisamment pertinent n'est fourni : reponds avec prudence a partir de tes connaissances generales, sans jamais mentionner explicitement que cette partie est basee sur l'IA ou moins fiable."}
 ${shortFollowUpQuestion ? "La question actuelle est une relance courte : appuie-toi d'abord sur le dernier echange utile avant d'elargir la reponse." : ""}
   `.trim();
@@ -2045,7 +2279,10 @@ function buildGroundingSummary(retrieval = null) {
     (resource) => resource.isQuestionRelevant
   );
   const hasImprovementRules = (retrieval.improvementRules || []).length > 0;
-  const hasDocumentChunks = (retrieval.chunks || []).length > 0;
+  // Seuls les extraits reellement retenus (contexte fort) comptent : les
+  // candidats ecartes ne fondent pas la reponse et faussaient le mode affiche
+  // ("documents" alors qu'aucun extrait n'etait transmis au modele).
+  const hasDocumentChunks = (retrieval.effectiveChunks || []).length > 0;
 
   return {
     mode: (hasManualResources || hasImprovementRules) && hasDocumentChunks
@@ -2060,7 +2297,7 @@ function buildGroundingSummary(retrieval = null) {
       (resource) => resource.isQuestionRelevant
     ).length,
     improvementRuleCount: (retrieval.improvementRules || []).length,
-    documentChunkCount: (retrieval.chunks || []).length,
+    documentChunkCount: (retrieval.effectiveChunks || []).length,
     publicSourceCount: (retrieval.sources || []).length,
     averagePriorityScore: Number(retrieval.averagePriorityScore || 0)
   };
@@ -2100,7 +2337,8 @@ export function buildRetrievalMetadataSummary(retrieval, grounding) {
       .map((resource) => resource.title),
     improvementRulesUsed: (retrieval.improvementRules || []).map((rule) =>
       String(rule.instruction || "").slice(0, 160)
-    )
+    ),
+    skillsUsed: (retrieval.skills || []).map((skill) => skill.title)
   };
 }
 
@@ -2123,21 +2361,45 @@ export async function previewDocumentChunks(documentRecord, { maxChunks = 40 } =
     throw new Error("Le fichier est vide.");
   }
 
-  const text = await readFileContent(absolutePath);
-  if (!text || !text.trim()) {
+  // L'apercu n'appelle jamais le modele de vision (trop long) : il montre les
+  // descriptions deja produites lors d'une indexation precedente.
+  const { text, visualEntries } = await extractDocumentForIndexing(absolutePath, documentRecord, {
+    visionMode: "cache-only"
+  });
+  if ((!text || !text.trim()) && visualEntries.length === 0) {
     throw new Error("Le document ne contient aucun texte exploitable.");
   }
 
-  const chunks = await buildIndexableChunks(text);
+  const textChunks = text && text.trim() ? await buildIndexableChunks(text) : [];
+  const entries = [
+    ...textChunks.map((content) => ({ content, kind: "text", pageNumber: null })),
+    ...visualEntries
+  ];
+  // Les extraits visuels restent visibles meme quand le texte depasse la limite.
+  const textEntries = entries.filter((entry) => entry.kind === "text");
+  const visualSlots = Math.min(
+    visualEntries.length,
+    Math.max(Math.floor(maxChunks / 2), maxChunks - textEntries.length)
+  );
+  const visibleEntries = [
+    ...textEntries.slice(0, maxChunks - visualSlots),
+    ...visualEntries.slice(0, visualSlots)
+  ];
 
   return {
-    totalChunks: chunks.length,
-    truncated: chunks.length > maxChunks,
-    chunks: chunks.slice(0, maxChunks).map((chunk, index) => ({
-      index,
-      charCount: chunk.length,
-      content: chunk
-    }))
+    totalChunks: entries.length,
+    visualChunks: visualEntries.length,
+    truncated: entries.length > visibleEntries.length,
+    chunks: visibleEntries.map((entry) => {
+      const index = entries.indexOf(entry);
+      return {
+        index,
+        charCount: entry.content.length,
+        content: entry.content,
+        kind: entry.kind,
+        pageNumber: entry.pageNumber
+      };
+    })
   };
 }
 
@@ -2158,30 +2420,54 @@ export async function indexDocument(documentRecord, { shouldAbort, beforeBatch, 
     throw new Error("Le fichier est vide.");
   }
 
-  const text = await readFileContent(absolutePath);
+  try {
+    pruneVisualDescriptions();
+  } catch {
+    // Nettoyage opportuniste du cache : sans incidence sur l'indexation.
+  }
 
-  if (!text || !text.trim()) {
-    throw new Error("Le document ne contient aucun texte exploitable.");
+  const { text, visualEntries, vision } = await extractDocumentForIndexing(absolutePath, documentRecord, {
+    visionMode: "full",
+    shouldAbort,
+    beforeVisionPage: typeof beforeBatch === "function" ? () => beforeBatch({ stage: "vision" }) : undefined,
+    onVisionProgress:
+      typeof onProgress === "function"
+        ? ({ processedPages, totalPages }) =>
+            onProgress({ stage: "vision", processedPages, totalPages, processedChunks: 0, totalChunks: 0 })
+        : undefined
+  });
+
+  if ((!text || !text.trim()) && visualEntries.length === 0) {
+    throw new Error(
+      path.extname(absolutePath).toLowerCase() === ".pdf"
+        ? "Le document ne contient aucun texte exploitable. S'il s'agit d'un PDF scanne, configurez un modele d'image capable de vision (onglet Modeles) puis relancez l'indexation."
+        : "Le document ne contient aucun texte exploitable."
+    );
   }
 
   abortIfNeeded();
-  const chunks = await buildIndexableChunks(text);
-  const documents = chunks
-    .map(
-      (chunk, index) =>
-        new Document({
-          pageContent: chunk,
-          metadata: {
-            document_id: documentRecord.id,
-            source_path: documentRecord.relativePath,
-            file_name: documentRecord.filename,
-            original_name: documentRecord.originalName,
-            folder: documentRecord.folderName,
-            visibility: documentRecord.visibility || "public",
-            chunk_index: index
-          }
-        })
-    );
+  const textChunks = text && text.trim() ? await buildIndexableChunks(text) : [];
+  const chunkEntries = [
+    ...textChunks.map((content) => ({ content, kind: "text", pageNumber: null })),
+    ...visualEntries
+  ];
+  const documents = chunkEntries.map(
+    (entry, index) =>
+      new Document({
+        pageContent: entry.content,
+        metadata: {
+          document_id: documentRecord.id,
+          source_path: documentRecord.relativePath,
+          file_name: documentRecord.filename,
+          original_name: documentRecord.originalName,
+          folder: documentRecord.folderName,
+          visibility: documentRecord.visibility || "public",
+          chunk_index: index,
+          content_type: entry.kind,
+          ...(entry.pageNumber ? { page_number: entry.pageNumber } : {})
+        }
+      })
+  );
 
   if (documents.length === 0) {
     throw new Error("Aucun extrait indexable n'a ete genere pour ce document.");
@@ -2224,13 +2510,27 @@ export async function indexDocument(documentRecord, { shouldAbort, beforeBatch, 
     throw error;
   }
 
+  const visualPageCount = new Set(visualEntries.map((entry) => entry.pageNumber)).size;
+  try {
+    setDocumentVisualPageCount(documentRecord.id, visualPageCount);
+  } catch {
+    // Statistique d'affichage uniquement.
+  }
+
   logger.info("Document indexe dans ChromaDB.", {
     relativePath: documentRecord.relativePath,
-    chunkCount: documents.length
+    chunkCount: documents.length,
+    visualChunkCount: visualEntries.length,
+    visualPageCount,
+    visionModel: vision?.model || null,
+    vision: vision?.stats || null
   });
 
   return {
-    chunkCount: documents.length
+    chunkCount: documents.length,
+    visualChunkCount: visualEntries.length,
+    visualPageCount,
+    vision: vision ? { model: vision.model, ...vision.stats } : null
   };
 }
 
@@ -2580,7 +2880,13 @@ export async function searchIndexedChunks(query, { folderName = "all", limit = 3
   };
 }
 
-export async function retrieveContext(question, folderName = "all", history = [], { sessionId = null } = {}) {
+export async function retrieveContext(
+  question,
+  folderName = "all",
+  history = [],
+  { sessionId = null, contextWindow = null } = {}
+) {
+  const sizing = getRetrievalSizing(contextWindow);
   const retrievalQuery = buildRetrievalQuery(question, history);
   const retrievalFocusQuestion = buildRetrievalFocusQuestion(question, history) || question;
   const folders = folderName === "all" ? await listFolders() : [folderName];
@@ -2615,9 +2921,9 @@ export async function retrieveContext(question, folderName = "all", history = []
       [retrievalQuery, ...expandedQueries].map((value) => String(value || "").trim()).filter(Boolean)
     )
   ];
-  const queryEmbeddings = await Promise.all(
-    retrievalQueryVariants.map((variant) => getEmbeddings().embedQuery(variant))
-  );
+  // Un seul appel /api/embed pour toutes les variantes (embedQuery revient a
+  // embedDocuments([texte])) au lieu d'une requete HTTP par reformulation.
+  const queryEmbeddings = await getEmbeddings().embedDocuments(retrievalQueryVariants);
 
   if (referencedDocument) {
     const directDocumentRows = await getIndexedRowsForDocument(referencedDocument);
@@ -2651,39 +2957,45 @@ export async function retrieveContext(question, folderName = "all", history = []
     correctionsFolderKey
   ];
 
-  for (const folder of collectionsToQuery) {
-    try {
-      const collection = await getCollection(folder);
-      const queryResult = await collection.query({
-        queryEmbeddings,
-        nResults: ragTopK,
-        include: ["documents", "metadatas", "distances"],
-        ...(folder === attachmentsFolderKey ? { where: buildAttachmentScopeFilter(sessionId) } : {})
-      });
+  // Collections interrogees en parallele (une requete HTTP chacune) plutot que
+  // l'une apres l'autre ; l'ordre des candidats reste celui des collections.
+  const collectionResults = await Promise.all(
+    collectionsToQuery.map(async (folder) => {
+      try {
+        const collection = await getCollection(folder);
+        const queryResult = await collection.query({
+          queryEmbeddings,
+          nResults: sizing.topK,
+          include: ["documents", "metadatas", "distances"],
+          ...(folder === attachmentsFolderKey ? { where: buildAttachmentScopeFilter(sessionId) } : {})
+        });
 
-      // Avec plusieurs requetes (query expansion), rows() renvoie un groupe de
-      // resultats par requete : on les aplatit tous dans les candidats.
-      const resultGroups = typeof queryResult.rows === "function" ? queryResult.rows() : [];
-      resultGroups.forEach((group) => {
-        (group || []).forEach((row) => {
-          candidates.push({
+        // Avec plusieurs requetes (query expansion), rows() renvoie un groupe de
+        // resultats par requete : on les aplatit tous dans les candidats.
+        const resultGroups = typeof queryResult.rows === "function" ? queryResult.rows() : [];
+        return resultGroups.flatMap((group) =>
+          (group || []).map((row) => ({
             pageContent: row.document || "",
             metadata: row.metadata || {},
             score: Number(row.distance || 0)
-          });
+          }))
+        );
+      } catch (error) {
+        forgetCollection(folder);
+        logger.warn("Recherche vectorielle ignoree pour une collection.", {
+          folder,
+          message: error.message
         });
-      });
-    } catch (error) {
-      logger.warn("Recherche vectorielle ignoree pour une collection.", {
-        folder,
-        message: error.message
-      });
-    }
-  }
+        return [];
+      }
+    })
+  );
+  collectionResults.forEach((rows) => candidates.push(...rows));
 
   const chunks = prioritizeDocumentChunks(
     retrievalFocusQuestion,
-    dedupeRetrievalCandidates(candidates)
+    dedupeRetrievalCandidates(candidates),
+    sizing
   );
   const domainKeywordScore = computeDomainKeywordScore(retrievalFocusQuestion, history);
   const maxRelevanceScore =
@@ -2751,7 +3063,7 @@ export async function retrieveContext(question, folderName = "all", history = []
       }
     });
 
-  const contextString = buildContextString(effectiveChunks);
+  const contextString = buildContextString(effectiveChunks, sizing);
 
   let ratingSignals = { goodExamples: [], badExamples: [] };
   try {
@@ -2806,36 +3118,90 @@ export async function retrieveContext(question, folderName = "all", history = []
   };
 }
 
-export async function getConversationContextSummary(history = [], modelName) {
-  const limit = getConversationHistoryLimit();
-  const recentHistory = getRecentConversationEntries(history, limit);
-  const characters = recentHistory.reduce(
-    (total, entry) => total + String(entry.content || "").length,
-    0
-  );
-
+/**
+ * Etat de la memoire avant generation (affiche par la jauge du chat) : estime
+ * ce que l'historique occupera dans la fenetre du modele qui va repondre.
+ */
+export async function getConversationContextSummary(history = [], modelName, { isReasoning = false } = {}) {
   const resolvedModelName = modelName || getActiveModel();
-  const modelContextWindow = await getModelContextLength(resolvedModelName);
+  const profile = await getModelProfile(resolvedModelName);
+  const historyMessages = (Array.isArray(history) ? history : [])
+    .filter((entry) => entry?.content)
+    .map((entry) => ({ role: entry.role, content: String(entry.content), kind: "history" }));
+  const fitted = fitMessagesToContext(historyMessages, {
+    contextWindow: profile?.contextWindow,
+    isReasoning,
+    maxVerbatimMessages: getConversationHistoryLimit()
+  });
 
   return {
-    usedMessages: recentHistory.length,
-    limit,
-    characters,
-    maxCharacters: maxConversationCharacters,
+    stage: "estimate",
     modelName: resolvedModelName,
-    modelContextWindow
+    modelContextWindow: fitted.stats.contextWindow,
+    modelMaxContext: profile?.maxContext ?? null,
+    contextWindow: fitted.stats.contextWindow,
+    estimatedPromptTokens: fitted.stats.estimatedPromptTokens,
+    outputReserve: fitted.stats.outputReserve,
+    history: fitted.stats.history,
+    // Compatibilite avec les anciens clients.
+    usedMessages: fitted.stats.history.verbatimMessages,
+    limit: getConversationHistoryLimit(),
+    characters: fitted.messages.reduce((total, message) => total + String(message.content || "").length, 0)
+  };
+}
+
+/**
+ * Ajuste le prompt a la fenetre de contexte du modele qui va repondre :
+ * consignes et question intactes, documents et pieces jointes repartis,
+ * historique recent mot pour mot, echanges anciens condenses.
+ */
+export async function fitChatMessagesForModel(messages, modelName, { isReasoning = false, retrieval = null } = {}) {
+  const profile = await getModelProfile(modelName);
+  const reasoning = isReasoning || Boolean(profile?.capabilities?.includes("thinking"));
+  const fitted = fitMessagesToContext(messages, {
+    contextWindow: profile?.contextWindow,
+    isReasoning: reasoning,
+    maxVerbatimMessages: getConversationHistoryLimit(),
+    verbatimHistory: retrieval?.carriesHistory !== false
+  });
+
+  if (fitted.stats.overflow || fitted.stats.truncatedDocuments > 0) {
+    logger.info("Prompt ajuste a la fenetre de contexte du modele.", {
+      modelName,
+      contextWindow: fitted.stats.contextWindow,
+      estimatedPromptTokens: fitted.stats.estimatedPromptTokens,
+      truncatedDocuments: fitted.stats.truncatedDocuments,
+      history: fitted.stats.history
+    });
+  }
+
+  return {
+    messages: fitted.messages,
+    promptPreview: buildMessagesPreview(fitted.messages),
+    context: {
+      stage: "prompt",
+      modelName,
+      modelMaxContext: profile?.maxContext ?? null,
+      modelContextWindow: fitted.stats.contextWindow,
+      ...fitted.stats,
+      characters: fitted.messages.reduce((total, message) => total + String(message.content || "").length, 0)
+    }
   };
 }
 
 export function buildChatMessages(question, history = [], retrieval = {}) {
   const shortFollowUpQuestion = isShortFollowUpQuestion(question);
   const carriesHistory = shouldCarryConversationHistory(question, history);
-  const recentHistory = (carriesHistory ? getRecentConversationEntries(history, getConversationHistoryLimit()) : []).map(
-    (entry) => ({
+  retrieval.carriesHistory = carriesHistory;
+  // Tout l'historique recu est transmis : fitChatMessagesForModel decide, selon
+  // la fenetre du modele, ce qui est repris mot pour mot ou condense.
+  const historyMessages = (Array.isArray(history) ? history : [])
+    .filter((entry) => entry?.content && (entry.role === "user" || entry.role === "assistant"))
+    .map((entry) => ({
       role: entry.role,
-      content: entry.content.trim()
-    })
-  );
+      content: String(entry.content).trim(),
+      kind: "history"
+    }));
 
   const messages = [
     {
@@ -2859,7 +3225,19 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
       content: `Consignes internes actives a respecter pour toutes les reponses. Elles font autorite sur le comportement, le nommage, les formulations et les regles du projet :\n\n${retrieval.manualResources
         .map(
           (resource, index) =>
-            `[RÈGLE ${index + 1}] ${resource.title}\nPriorité : ${resource.priorityScore}\n${resource.content.trim()}`
+            `[RÈGLE ${index + 1}] ${resource.title}\n${resource.content.trim()}`
+        )
+        .join("\n\n")}`
+    });
+  }
+
+  if (retrieval.skills?.length > 0) {
+    messages.push({
+      role: "system",
+      content: `Methodes de reponse (skills) definies par l'equipe, a appliquer a cette reponse. Elles decrivent la facon de structurer et de formuler la reponse ; elles ne remplacent ni les personnalisations internes ni les documents, qui restent la source des faits. N'evoque jamais ces methodes ni le mot "skill" dans la reponse :\n\n${retrieval.skills
+        .map(
+          (skill, index) =>
+            `[METHODE ${index + 1}] ${skill.title}${skill.description ? `\nObjectif : ${skill.description}` : ""}\n${skill.instructions}`
         )
         .join("\n\n")}`
     });
@@ -2868,12 +3246,13 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
   if (retrieval.documentLinkResources?.some((resource) => resource.isQuestionRelevant)) {
     messages.push({
       role: "system",
+      kind: "rag",
       content: `Documentation web interne pertinente a utiliser comme contexte documentaire complémentaire :\n\n${retrieval.documentLinkResources
         .filter((resource) => resource.isQuestionRelevant)
         .slice(0, 4)
         .map(
           (resource, index) =>
-            `[LIEN ${index + 1}] ${resource.title}\nPriorité : ${resource.priorityScore}\nDescription : ${resource.content.trim()}\nURL : ${resource.link_url || ""}`
+            `[LIEN ${index + 1}] ${resource.title}\nDescription : ${resource.content.trim()}\nURL : ${resource.link_url || ""}`
         )
         .join("\n\n")}`
     });
@@ -2886,7 +3265,7 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
       content: `Corrections deja validees par l'administration. Si la situation actuelle correspond, applique-les comme des consignes prioritaires :\n\n${retrieval.improvementRules
         .map(
           (rule, index) =>
-            `[CORRECTION ${index + 1}] Priorite : ${rule.priority}\nScore de correspondance : ${rule.matchScore || 0}\nInstruction : ${rule.instruction}${
+            `[CORRECTION ${index + 1}]\nInstruction : ${rule.instruction}${
               rule.exampleQuestion ? `\nQuestion de reference : ${rule.exampleQuestion}` : ""
             }${
               rule.correctedResponse ? `\nRéponse attendue : ${rule.correctedResponse}` : ""
@@ -2907,7 +3286,8 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
   if (retrieval.ratingSignals?.goodExamples?.length > 0) {
     messages.push({
       role: "system",
-      content: `Reponses deja jugees satisfaisantes par les utilisateurs sur des questions proches. Inspire-toi de leur contenu et de leur niveau de detail :\n\n${retrieval.ratingSignals.goodExamples
+      kind: "examples",
+      content: `Reponses deja jugees satisfaisantes par des utilisateurs sur des questions proches. Inspire-toi de leur structure et de leur niveau de detail ; pour les faits, les documents internes, les personnalisations et les corrections validees priment toujours sur ces exemples :\n\n${retrieval.ratingSignals.goodExamples
         .map(
           (example, index) =>
             `[BON EXEMPLE ${index + 1}]\nQuestion : ${example.question}\nRéponse appréciée : ${example.answer}`
@@ -2919,7 +3299,8 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
   if (retrieval.ratingSignals?.badExamples?.length > 0) {
     messages.push({
       role: "system",
-      content: `Reponses deja jugees insatisfaisantes par les utilisateurs sur des questions proches. Ne reproduis pas ces reponses telles quelles : corrige leurs manques, sois plus precis et plus utile :\n\n${retrieval.ratingSignals.badExamples
+      kind: "examples",
+      content: `Reponses deja jugees insatisfaisantes par des utilisateurs sur des questions proches. Evite leurs defauts (imprecision, manque d'utilite), sans jamais contredire pour autant les documents internes, les personnalisations ni les consignes de securite :\n\n${retrieval.ratingSignals.badExamples
         .map(
           (example, index) =>
             `[REPONSE A AMELIORER ${index + 1}]\nQuestion : ${example.question}\nRéponse jugée insuffisante : ${example.answer}`
@@ -2931,6 +3312,7 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
   if (retrieval.contextString) {
     messages.push({
       role: "system",
+      kind: "rag",
       content: `Contexte interne issu des documents du projet (à suivre en priorité quand il répond à la question) :\n\n${retrieval.contextString}`
     });
   }
@@ -2943,10 +3325,11 @@ export function buildChatMessages(question, history = [], retrieval = {}) {
     });
   }
 
-  messages.push(...recentHistory);
+  messages.push(...historyMessages);
   messages.push({
     role: "user",
-    content: question.trim()
+    content: question.trim(),
+    kind: "question"
   });
 
   return messages;
@@ -2956,7 +3339,7 @@ export async function buildRagPayload(
   question,
   folderName = "all",
   history = [],
-  { sessionId = null, hasAttachments = false } = {}
+  { sessionId = null, hasAttachments = false, skillId = null, modelName = null } = {}
 ) {
   if ((isDocumentInventoryRequest(question) || isDocumentAccessRequest(question)) && getDocuments().length === 0) {
     await syncFilesystemToDatabase();
@@ -2967,18 +3350,38 @@ export async function buildRagPayload(
   const documentInventoryRequest = isDocumentInventoryRequest(question);
   const explicitDocumentRequest = findExplicitDocumentRequest(question);
   const requestedDocumentGroup = findRequestedDocumentGroup(question);
-  const retrieval = await retrieveContext(question, folderName, history, { sessionId });
+  // Volume d'extraits documentaires proportionne a la fenetre du modele qui repond.
+  const answeringProfile = modelName ? await getModelProfile(modelName).catch(() => null) : null;
+  const retrieval = await retrieveContext(question, folderName, history, {
+    sessionId,
+    contextWindow: answeringProfile?.contextWindow || null
+  });
   retrieval.projectFocusScore = computeProjectFocusScore(question, retrieval, history);
+  try {
+    retrieval.skills = selectSkillsForQuestion(question, {
+      explicitSkillId: skillId,
+      overlapScorer: computeTextOverlapScore
+    });
+  } catch (error) {
+    // Un skill mal forme ne doit jamais empecher de repondre.
+    logger.warn("Selection des skills ignoree.", { message: error.message });
+    retrieval.skills = [];
+  }
   const grounding = buildGroundingSummary(retrieval);
+  // Un skill choisi explicitement par l'utilisateur porte sur la facon de
+  // repondre : les reponses toutes faites (inventaire, "voici le document"...)
+  // sont alors court-circuitees au profit d'une vraie reponse du modele.
+  const hasExplicitSkill = retrieval.skills.some((skill) => skill.reason === "selection");
 
-  // Question accompagnee d'un fichier : les reponses toutes faites (document
-  // prive, inventaire, "voici le document"...) sont court-circuitees, la
-  // question porte sur le fichier joint et doit etre traitee par le modele.
-  if (hasAttachments) {
-    const attachmentMessages = buildChatMessages(question, history, retrieval);
+  // Question accompagnee d'un fichier ou d'un skill choisi : les reponses
+  // toutes faites (document prive, inventaire, "voici le document"...) sont
+  // court-circuitees, la question doit etre traitee par le modele. Les sources
+  // renvoyees restent filtrees (documents publics uniquement).
+  if (hasAttachments || hasExplicitSkill) {
+    const directMessages = buildChatMessages(question, history, retrieval);
     return {
-      messages: attachmentMessages,
-      promptPreview: buildMessagesPreview(attachmentMessages),
+      messages: directMessages,
+      promptPreview: buildMessagesPreview(directMessages),
       sources: retrieval.sources,
       grounding,
       responseOverride: null,
@@ -3095,8 +3498,8 @@ export async function buildRagPayload(
       grounding,
       responseOverride:
         requestedDocumentGroup?.searchTerms?.length > 0
-          ? `Je n'ai pas trouvé de document correspondant a ${requestedDocumentGroup.searchTerms.join(", ")} parmi les documents a ma disposition.`
-          : "Je ne peux pas lister ou transmettre tous les documents depuis le chat. Utilisez l'administration ou l'onglet de recherche pour consulter les documents indexes."
+          ? `Je n'ai pas trouvé de document correspondant à « ${requestedDocumentGroup.searchTerms.join(", ")} » parmi les documents à ma disposition.`
+          : "Je ne peux pas lister ni transmettre tous les documents depuis le chat. Précisez le sujet ou le nom du document recherché."
     };
   }
 

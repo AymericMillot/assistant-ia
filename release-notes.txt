@@ -1,3 +1,42 @@
+Version 1.1.6 — fiabilité et performances du chat, de l'indexation et de l'interface
+(7 octobre 2026).
+
+Corrections :
+- Recherche documentaire : une indisponibilité ponctuelle de ChromaDB (au
+  démarrage par exemple) ne bloque plus les recherches jusqu'au redémarrage.
+- Réindexation complète : l'état ne reste plus bloqué sur « en cours » après
+  une erreur.
+- Arrêt du serveur propre (flux en cours interrompus avec un message clair,
+  Redis et SQLite fermés correctement) au lieu d'être tué par Docker.
+- Chat : possibilité de remonter lire pendant qu'une réponse s'affiche ;
+  « Stop » suivi d'une nouvelle question n'annule plus la nouvelle question ;
+  fermer la page interrompt bien la génération ; un événement illisible
+  n'interrompt plus la réponse.
+- Ollama : plus de blocage d'une minute quand le service est arrêté, délais
+  sur les appels de métadonnées, bascule vers un modèle de secours seulement
+  en cas d'échec du modèle principal.
+- Journaux : rotation automatique (LOG_MAX_SIZE_MB, LOG_MAX_FILES).
+
+Performances :
+- Chat public : ~91 Ko téléchargés au lieu de ~643 Ko (administration
+  chargée à la demande, fichiers précompressés en brotli au build).
+- Affichage des réponses en streaming plus fluide (mises à jour regroupées,
+  seul le message en cours est redessiné).
+- Chaque question : un seul appel d'embedding pour toutes les reformulations,
+  collections ChromaDB interrogées en parallèle, reformulation bornée en
+  longueur et en durée, scoring lexical accéléré.
+- Indexation : seuls les fichiers modifiés sont relus (empreintes en cache),
+  notifications de progression limitées, file d'attente interrogée par
+  compteurs.
+- SQLite : écritures plus rapides (WAL + synchronous NORMAL), requêtes
+  réutilisées, nouveaux index, journal des scores de recherche purgé.
+- OLLAMA_MAX_LOADED_MODELS passe à 2 par défaut : le modèle de conversation
+  n'est plus déchargé à chaque question. Dans un .env existant, remplacez
+  OLLAMA_MAX_LOADED_MODELS=1 par 2 pour en profiter.
+
+Tests : suite backend portée à 51 tests (client Ollama, stockage, fichiers
+statiques précompressés).
+
 Version 1.1.5 — pièces jointes du chat rétablies et fiabilisées, mises à jour sans sudo
 (23 septembre 2026).
 

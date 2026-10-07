@@ -178,3 +178,46 @@ body {
     transform: translateY(-3px) scale(1);
   }
 }
+
+@layer components {
+  .kbd {
+    @apply inline-flex min-w-[1.4rem] items-center justify-center rounded-md border border-slate-300 bg-slate-50 px-1 font-sans text-[11px] font-semibold text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300;
+  }
+}
+
+/* Impression / export PDF d'une conversation : seule la conversation est
+   imprimee, sur fond blanc, sans zone de defilement ni commandes. */
+@media print {
+  html,
+  body,
+  .dark body {
+    background: #fff !important;
+    color: #0f172a !important;
+  }
+
+  .app-shell::before {
+    display: none;
+  }
+
+  .chat-print-area {
+    min-height: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    backdrop-filter: none !important;
+  }
+
+  .chat-print-area .chat-stage {
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  .chat-print-area article {
+    break-inside: avoid;
+  }
+
+  .chat-print-area article > div > div {
+    box-shadow: none !important;
+  }
+}

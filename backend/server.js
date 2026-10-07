@@ -5,18 +5,18 @@ import path from "path";
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import jwt from "jsonwebtoken";
 import { Server as SocketIOServer } from "socket.io";
-import { getSetting, initializeDatabase } from "./config/db.js";
+import { closeDatabase, getSetting, initializeDatabase } from "./config/db.js";
 import { synchronizeOwnerBootstrapPassword } from "./services/accessPasswordService.js";
 import { logger, registerRealtimeEmitter } from "./config/logger.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes from "./routes/chat.js";
 import adminRoutes from "./routes/admin.js";
 import feedbackRoutes from "./routes/feedback.js";
+import { verifySessionToken } from "./middleware/authMiddleware.js";
 import { syncFilesystemToDatabase } from "./services/fileService.js";
 import { getAttachmentLimits, reconcileAttachmentIndexes } from "./services/attachmentService.js";
-import { initializeQueueService, shutdownQueue } from "./services/queueService.js";
+import { abortActiveChatStreams, initializeQueueService, shutdownQueue } from "./services/queueService.js";
 import {
   initializeSchedulerService,
   markInteractiveRequestFinished,
@@ -34,6 +34,7 @@ import {
 } from "./config/featureFlags.js";
 import { getActiveModelByRole } from "./services/ollamaService.js";
 import { scheduleModelCatalogRefresh } from "./services/modelCatalogRefreshService.js";
+import { applyStaticCacheHeaders, createPrecompressedStaticMiddleware } from "./utils/staticAssets.js";
 import {
   createRateLimiter,
   enforceTrustedOrigin,
@@ -238,8 +239,8 @@ io.use((socket, next) => {
 
   try {
     const token = decodeURIComponent(tokenPair.slice("token=".length));
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    if (!payload?.role) {
+    const payload = verifySessionToken(token);
+    if (!payload) {
       throw new Error("Session invalide.");
     }
     socket.user = payload;
@@ -325,8 +326,8 @@ app.use(
     message: "Trop de requetes d'administration. Reessayez dans une minute."
   })
 );
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 app.use(cookieParser());
 
 app.use((req, res, next) => {
@@ -428,23 +429,12 @@ if (hasBundledFrontend) {
     res.setHeader("Cache-Control", "no-store");
     res.sendFile(frontendIndexPath);
   });
+  app.use(createPrecompressedStaticMiddleware(frontendDistPath));
   app.use(
     express.static(frontendDistPath, {
       etag: true,
       maxAge: "1h",
-      setHeaders: (res, filePath) => {
-        if (filePath.endsWith("index.html")) {
-          res.setHeader("Cache-Control", "no-store");
-          return;
-        }
-
-        if (/[.-][A-Za-z0-9_-]{6,}\.(js|css)$/.test(filePath)) {
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-          return;
-        }
-
-        res.setHeader("Cache-Control", "public, max-age=3600");
-      }
+      setHeaders: applyStaticCacheHeaders
     })
   );
   app.get(/^(?!\/api(?:\/|$)).*/, (_req, res) => {
@@ -454,12 +444,33 @@ if (hasBundledFrontend) {
 }
 
 app.use((error, _req, res, _next) => {
-  logger.error("Erreur HTTP non geree.", {
-    message: error.message,
-    stack: error.stack
-  });
+  let statusCode = error.statusCode || error.status || 500;
 
-  let statusCode = error.statusCode || 500;
+  // Erreurs attendues (validation, droits, ressource absente) : pas de pile
+  // d'appel dans les journaux, seulement les vraies erreurs serveur.
+  if (statusCode >= 500) {
+    logger.error("Erreur HTTP non geree.", {
+      message: error.message,
+      stack: error.stack
+    });
+  }
+
+  if (res.headersSent) {
+    // Reponse deja partiellement envoyee (flux, telechargement) : on ne peut
+    // plus changer le statut, on ferme simplement la connexion.
+    res.end();
+    return;
+  }
+
+  // Corps JSON invalide envoye par le client.
+  if (error?.type === "entity.parse.failed") {
+    statusCode = 400;
+    error.message = "Requete invalide.";
+  } else if (error?.type === "entity.too.large") {
+    statusCode = 413;
+    error.message = "Requete trop volumineuse.";
+  }
+
   let message = error.message || "Requete invalide.";
 
   if (error?.name === "MulterError") {
@@ -479,7 +490,9 @@ app.use((error, _req, res, _next) => {
     }
   }
 
-  const isServerError = statusCode >= 500;
+  // Les erreurs serveur restent masquees, sauf celles dont le message a ete
+  // explicitement prevu pour l'utilisateur (expose: service indisponible...).
+  const isServerError = statusCode >= 500 && error?.expose !== true;
 
   res.status(statusCode).json({
     message: isServerError ? "Erreur interne du serveur." : message
@@ -498,12 +511,67 @@ server.listen(port, "0.0.0.0", () => {
   });
 });
 
-const shutdown = async () => {
-  logger.info("Arret du serveur backend...");
+// Docker laisse 10 s avant de tuer le conteneur : on garde une marge pour
+// fermer Redis et SQLite proprement (point de controle du WAL).
+const shutdownGraceMs = Math.max(1000, Number(process.env.SHUTDOWN_GRACE_MS || 7000));
+let shuttingDown = false;
+
+function closeHttpServer(timeoutMs) {
+  return new Promise((resolve) => {
+    // Les flux SSE en cours et les connexions keep-alive empechaient
+    // server.close() d'aboutir : passe le delai, elles sont fermees de force.
+    const forceTimer = setTimeout(() => {
+      server.closeAllConnections?.();
+      resolve();
+    }, timeoutMs);
+    forceTimer.unref();
+
+    server.close(() => {
+      clearTimeout(forceTimer);
+      resolve();
+    });
+    server.closeIdleConnections?.();
+  });
+}
+
+const shutdown = async (signal) => {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  logger.info("Arret du serveur backend...", { signal });
+
+  const hardExitTimer = setTimeout(() => {
+    logger.warn("Arret force : delai de fermeture depasse.");
+    process.exit(1);
+  }, shutdownGraceMs + 2000);
+  hardExitTimer.unref();
+
   shutdownSchedulerService();
-  await shutdownQueue();
-  server.close(() => process.exit(0));
+  abortActiveChatStreams("Le serveur redémarre. Réessayez votre question dans un instant.");
+  io.disconnectSockets(true);
+  await closeHttpServer(shutdownGraceMs);
+  await shutdownQueue().catch((error) => {
+    logger.warn("Fermeture de la file d'attente incomplete.", { message: error.message });
+  });
+
+  try {
+    closeDatabase();
+  } catch (error) {
+    logger.warn("Fermeture de la base SQLite incomplete.", { message: error.message });
+  }
+
+  process.exit(0);
 };
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+// Filet de securite : une promesse rejetee sans gestionnaire (ex. Redis
+// redemarre) est journalisee au lieu d'arreter tout le serveur.
+process.on("unhandledRejection", (reason) => {
+  logger.error("Promesse rejetee non geree.", {
+    message: reason?.message || String(reason),
+    stack: reason?.stack
+  });
+});

@@ -91,9 +91,14 @@ export default function AuditLogManager() {
           <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
             {total} action(s) enregistrée(s)
           </h3>
-          <button className="ghost-button" onClick={() => loadEntries(page)} disabled={loading}>
-            {loading ? "Chargement..." : "Actualiser"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <a className="ghost-button" href="/api/admin/exports/audit">
+              Exporter (CSV)
+            </a>
+            <button className="ghost-button" onClick={() => loadEntries(page)} disabled={loading}>
+              {loading ? "Chargement..." : "Actualiser"}
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 space-y-2">

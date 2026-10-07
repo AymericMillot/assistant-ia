@@ -8,7 +8,7 @@ const fallbackBranding = {
   projectName: "Assistant local",
   shortName: "L'assistant",
   welcomeMessage:
-    "Assistant local pour retrouver rapidement les bonnes consignes et procédures. Vos échanges restent sur cette machine et ne sont pas conservés après fermeture de la page."
+    "Assistant local pour retrouver rapidement les bonnes consignes et procédures. Vos échanges ne quittent pas ce serveur ; ils peuvent être relus par l'équipe pour améliorer les réponses."
 };
 
 let cachedBranding = null;

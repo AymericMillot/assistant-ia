@@ -30,7 +30,7 @@ const passwordChangeRateLimiter = createRateLimiter({
 // reponse ne revele pas si l'identifiant existe (sinon bcrypt.compare est saute).
 const dummyPasswordHash = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO7hCkG7f0mBUeOOyMwyJx4CjQfMoZHyO";
 
-function cookieOptions(role) {
+function cookieOptions() {
   const maxAge = 7 * 24 * 60 * 60 * 1000;
   const secureCookies =
     process.env.COOKIE_SECURE !== undefined
@@ -79,14 +79,14 @@ router.post("/login", loginRateLimiter, async (req, res) => {
       { expiresIn: expiresInSeconds }
     );
 
-    res.cookie("token", token, cookieOptions(role));
+    res.cookie("token", token, cookieOptions());
     return res.json({
       user: { role, adminUserId: adminUser.id, identifiant: adminUser.identifier },
       mustChangePassword: false
     });
   }
 
-  const role = validateAccessPassword(password);
+  const role = await validateAccessPassword(password);
   if (!role) {
     return res.status(401).json({ message: "Mot de passe invalide." });
   }
@@ -106,7 +106,7 @@ router.post("/login", loginRateLimiter, async (req, res) => {
 
   const mustChangePassword = role === "referent" && isTeacherPasswordChangeRequired();
 
-  res.cookie("token", token, cookieOptions(role));
+  res.cookie("token", token, cookieOptions());
   return res.json({
     user: {
       role,
@@ -185,6 +185,13 @@ router.put(
     } catch {
       // Le journal d'audit ne doit jamais faire echouer l'action elle-meme.
     }
+
+    // Le changement de mot de passe invalide les sessions existantes : la
+    // session courante est reemise pour que le referent reste connecte.
+    const token = jwt.sign({ role: "referent", adminUserId: "temporary-admin" }, process.env.JWT_SECRET, {
+      expiresIn: 7 * 24 * 60 * 60
+    });
+    res.cookie("token", token, cookieOptions());
 
     return res.json({ message: "Mot de passe référent mis à jour avec succès." });
   }

@@ -921,6 +921,22 @@ if [[ -z "$current_updater_token" ]]; then
   update_env "UPDATER_SHARED_TOKEN" "$(generate_random_key)"
 fi
 
+# Socket du moteur Docker monte dans le service de mise a jour (voir
+# DOCKER_SOCKET_PATH dans docker-compose.yml) : /var/run/docker.sock pour
+# Docker Engine et Docker Desktop, socket du contexte actif pour Docker
+# rootless ou Podman (sinon le conteneur updater ne peut pas etre cree).
+docker_socket_path="/var/run/docker.sock"
+if [[ ! -S /var/run/docker.sock ]] \
+  && ! docker info --format '{{.OperatingSystem}}' 2>/dev/null | grep -qi 'docker desktop'; then
+  docker_host_uri="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)}"
+  if [[ "$docker_host_uri" == unix://* && -S "${docker_host_uri#unix://}" ]]; then
+    docker_socket_path="${docker_host_uri#unix://}"
+  fi
+fi
+if [[ "$(get_env_value "DOCKER_SOCKET_PATH")" != "$docker_socket_path" ]]; then
+  update_env "DOCKER_SOCKET_PATH" "$docker_socket_path"
+fi
+
 # Identite sous laquelle le backend ecrit uploads/logs/data : celle du
 # proprietaire du projet (et non root), pour que les mises a jour et le
 # nettoyage ne demandent jamais sudo. Si install.sh est lance via sudo, on
@@ -1003,6 +1019,88 @@ build_service_or_reuse_local() {
   return 1
 }
 
+# Docker (couches d'image) et Ollama (modeles) impriment une nouvelle ligne a
+# chaque mise a jour de progression des que la sortie standard n'est pas un
+# terminal (systematiquement le cas ici : elle est dupliquee via "tee" pour
+# rester a la fois visible et analysable en cas d'echec). Plusieurs
+# telechargements en parallele (couches Docker) entrelacent en plus leurs
+# lignes. Ce filtre reconstitue, pour chaque telechargement identifie, une
+# seule ligne mise a jour sur place, au lieu de laisser le flux s'empiler.
+# Pas de tableau associatif : macOS fournit par defaut bash 3.2 (licence
+# GPLv3), qui ne le supporte pas. Deux tableaux paralleles (index/valeur)
+# font l'affaire pour le petit nombre de telechargements simultanes ici.
+collapse_progress_lines() {
+  local line key i found
+  local -a keys=()
+  local -a lines=()
+  local rendered=0
+
+  while IFS= read -r line; do
+    key=""
+    if [[ "$line" =~ ^[[:space:]]*([0-9a-f]{12}):?[[:space:]]+(Downloading|Extracting|Verifying[[:space:]]Checksum|Waiting) ]]; then
+      key="${BASH_REMATCH[1]}"
+      found=0
+      for ((i = 0; i < ${#keys[@]}; i++)); do
+        if [[ "${keys[$i]}" == "$key" ]]; then
+          lines[$i]="$line"
+          found=1
+          break
+        fi
+      done
+      [[ "$found" -eq 0 ]] && { keys+=("$key"); lines+=("$line"); }
+    elif [[ "$line" =~ ^[[:space:]]*([0-9a-f]{12}):?[[:space:]]+(Pull[[:space:]]complete|Download[[:space:]]complete|Already[[:space:]]exists) ]]; then
+      key="${BASH_REMATCH[1]}"
+      for ((i = 0; i < ${#keys[@]}; i++)); do
+        if [[ "${keys[$i]}" == "$key" ]]; then
+          unset 'keys[i]' 'lines[i]'
+          # "${arr[@]}" plante avec "unbound variable" sous bash 3.2 (macOS)
+          # si le tableau est totalement vide ; la forme ci-dessous l'evite.
+          keys=("${keys[@]+"${keys[@]}"}")
+          lines=("${lines[@]+"${lines[@]}"}")
+          break
+        fi
+      done
+      key="layer-completed"
+    elif [[ "$line" == pulling\ *:* ]]; then
+      key="${line%%:*}"
+      found=0
+      for ((i = 0; i < ${#keys[@]}; i++)); do
+        if [[ "${keys[$i]}" == "$key" ]]; then
+          lines[$i]="$line"
+          found=1
+          break
+        fi
+      done
+      [[ "$found" -eq 0 ]] && { keys+=("$key"); lines+=("$line"); }
+    fi
+
+    if [[ -n "$key" ]]; then
+      if [[ ${#keys[@]} -gt 0 ]]; then
+        local summary=""
+        for ((i = 0; i < ${#keys[@]}; i++)); do
+          summary+="${summary:+  |  }${lines[$i]}"
+        done
+        printf '\r\033[K%s' "$summary"
+        rendered=1
+      elif [[ "$rendered" -eq 1 ]]; then
+        printf '\n'
+        rendered=0
+      fi
+    else
+      if [[ "$rendered" -eq 1 ]]; then
+        printf '\n'
+        rendered=0
+      fi
+      printf '%s\n' "$line"
+      keys=()
+      lines=()
+    fi
+  done
+  if [[ "$rendered" -eq 1 ]]; then
+    printf '\n'
+  fi
+}
+
 # "docker compose up" peut echouer avec le code 125 (echec de la commande
 # docker/compose elle-meme, pas du conteneur) pour des raisons variees :
 # daemon Docker pas encore pret, cache de build corrompu, ressources
@@ -1021,7 +1119,7 @@ docker_compose_up_service_required() {
     # et ferait retourner 0 (succes) a la fin malgre l'echec reel. La sortie
     # est dupliquee (tee) pour rester visible tout en etant analysable par
     # recover_docker_125.
-    if docker compose -f "$ROOT_DIR/docker-compose.yml" up -d "${services[@]}" 2>&1 | tee "$log_file"; then
+    if docker compose -f "$ROOT_DIR/docker-compose.yml" up -d "${services[@]}" 2>&1 | tee "$log_file" | collapse_progress_lines; then
       exit_code=0
     else
       exit_code=${PIPESTATUS[0]}
@@ -1227,7 +1325,7 @@ pull_ollama_model() {
   # (espace disque...) sans avoir a la reafficher a la main en cas d'echec.
   local pull_log pull_status pull_output
   pull_log="$(mktemp)"
-  if docker exec assistant-ia-ollama ollama pull "$model" 2>&1 | tee "$pull_log"; then
+  if docker exec assistant-ia-ollama ollama pull "$model" 2>&1 | tee "$pull_log" | collapse_progress_lines; then
     pull_status=0
   else
     pull_status=$?
