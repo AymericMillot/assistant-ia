@@ -17,6 +17,10 @@ const autoUpdateMaxDeferMinutes = Number(process.env.AUTO_UPDATE_MAX_DEFER_MINUT
 // chaque jour a minuit, la derniere version est installee en arriere-plan
 // si elle est disponible (reportee si une conversation est en cours).
 const AUTO_UPDATE_TIME = "00:00";
+// Fenetre pendant laquelle une verification ratee (updater qui redemarre,
+// GitHub injoignable, serveur eteint a minuit) est retentee a chaque tick :
+// l'installation se fait des que la source redevient joignable, sans action.
+const autoUpdateRetryWindowMinutes = Number(process.env.AUTO_UPDATE_RETRY_WINDOW_MINUTES || 22 * 60);
 
 let lastActivityAt = Date.now();
 let activeChatCount = 0;
@@ -238,7 +242,7 @@ async function maybeRunScheduledUpdate() {
     // consommee, on retente au tick suivant tant que la fenetre de report
     // n'est pas depassee.
     const checkFailed = status?.state?.status === "unavailable" || (!status?.release && status?.warning);
-    if (checkFailed && deferredMinutes <= autoUpdateMaxDeferMinutes) {
+    if (checkFailed && deferredMinutes <= autoUpdateRetryWindowMinutes) {
       setSetting("lastAutoUpdateRunDate", "");
       return;
     }
@@ -259,7 +263,7 @@ async function maybeRunScheduledUpdate() {
     try {
       await updateServiceModule.applyUpdate();
     } catch (applyError) {
-      if (applyError?.code === "UPDATER_UNAVAILABLE" && deferredMinutes <= autoUpdateMaxDeferMinutes) {
+      if (applyError?.code === "UPDATER_UNAVAILABLE" && deferredMinutes <= autoUpdateRetryWindowMinutes) {
         setSetting("lastAutoUpdateRunDate", "");
         logger.warn("Mise a jour automatique reportee : service de mise a jour injoignable, nouvel essai.");
         return;

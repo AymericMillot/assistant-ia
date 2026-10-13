@@ -92,7 +92,7 @@ const effectiveReleaseTtlMs = Math.max(remoteReleaseTtlMs, minReleaseRefreshGapM
 // quotidien ne reparte pas de zero a chaque redemarrage.
 // Espacement des nouvelles tentatives quand aucune liste n'a encore pu etre
 // recuperee (premiere installation, reseau coupe au demarrage...).
-const noCacheRetryGapMs = Math.max(10000, Number(process.env.UPDATE_NO_CACHE_RETRY_MS || 2 * 60 * 1000));
+const noCacheRetryGapMs = Math.max(10000, Number(process.env.UPDATE_NO_CACHE_RETRY_MS || 30 * 1000));
 // Temps maximal pendant lequel /status attend la source distante : au-dela, la
 // reponse part avec le cache (ou "verification en cours") et la verification
 // continue en arriere-plan. Reste sous le delai d'attente du backend (12 s).

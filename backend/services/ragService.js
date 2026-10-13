@@ -112,7 +112,7 @@ let embeddingsInstanceModel = null;
 function getEmbeddings() {
   const configuredEmbeddingModel = getSetting(
     "embeddingModel",
-    process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest"
+    process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m"
   );
   const embeddingModel = String(configuredEmbeddingModel || "").includes(":")
     ? configuredEmbeddingModel

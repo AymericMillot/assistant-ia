@@ -382,7 +382,8 @@ export default function UpdateManager() {
         {error ? <Alert tone="error" className="mt-4">{error}</Alert> : null}
         {!error && status?.state?.status === "unavailable" && (
           <Alert tone="warning" className="mt-4">
-            {status?.state?.message || "Le service de mise à jour est temporairement indisponible."}
+            Vérification des mises à jour en cours, nouvelle tentative automatique. Les mises à jour
+            programmées (chaque nuit à minuit) se feront dès que le service répond.
           </Alert>
         )}
         {status?.state?.status === "error" && status?.state?.error ? (

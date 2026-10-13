@@ -88,6 +88,7 @@ router.get("/dashboard", async (_req, res, next) => {
       documents: getDocumentStats(),
       indexing: getIndexingStatus(),
       activeModel: getActiveModel(),
+      embeddingModel: getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m"),
       skills: {
         total: skills.length,
         enabled: skills.filter((skill) => skill.isEnabled).length

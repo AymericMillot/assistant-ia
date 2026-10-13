@@ -43,8 +43,8 @@ const resolveRuntimePath = (targetPath) =>
   path.isAbsolute(targetPath) ? targetPath : path.resolve(process.cwd(), targetPath);
 
 const defaultSettings = {
-  activeModel: process.env.DEFAULT_MODEL || "gemma2:2b",
-  embeddingModel: process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest",
+  activeModel: process.env.DEFAULT_MODEL || "gemma4:e4b",
+  embeddingModel: process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m",
   autoIndexEnabled: process.env.AUTO_INDEX_ENABLED ?? "true",
   lastFullIndexAt: "",
   lastIndexedDocumentsCount: "0"

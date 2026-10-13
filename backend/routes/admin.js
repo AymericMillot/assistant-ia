@@ -1429,7 +1429,7 @@ router.post("/models/recommend", (req, res, next) => {
 });
 
 router.get("/models", async (_req, res) => {
-  const embeddingModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest");
+  const embeddingModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m");
 
   try {
     const models = await ollamaService.listVisibleModels();
@@ -1586,7 +1586,7 @@ router.put("/models/embedding", requireRole(["administrator", "owner"]), async (
       });
     }
 
-    const previousModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest");
+    const previousModel = getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m");
     if (previousModel === modelName) {
       return res.json({
         message: "Ce modele d'embedding est deja actif.",

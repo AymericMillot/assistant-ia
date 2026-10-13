@@ -142,6 +142,7 @@ export default function DashboardManager({ onNavigate, updateAvailable, availabl
             </h2>
             <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
               Modèle actif : <span className="font-medium text-slate-700 dark:text-slate-200">{data?.activeModel || "—"}</span>
+              {" · "}Embedding : <span className="font-medium text-slate-700 dark:text-slate-200">{data?.embeddingModel || "—"}</span>
               {data?.indexing?.isRunning ? " · indexation en cours" : ""}
             </p>
           </div>

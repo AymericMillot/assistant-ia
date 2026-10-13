@@ -19,7 +19,7 @@ const metadataRequestTimeoutMs = Math.max(1000, Number(process.env.OLLAMA_METADA
 // pour suivre un eventuel changement de modele d'embedding sans redemarrage.
 function getHiddenModelNames() {
   return new Set([
-    getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "nomic-embed-text-v2-moe:latest")
+    getSetting("embeddingModel", process.env.EMBEDDING_MODEL || "embeddinggemma-2:740m")
   ]);
 }
 
@@ -378,7 +378,7 @@ export async function listVisibleModels() {
 }
 
 export function getActiveModel() {
-  return getSetting("activeModel", process.env.DEFAULT_MODEL || "gemma2:2b");
+  return getSetting("activeModel", process.env.DEFAULT_MODEL || "gemma4:e4b");
 }
 
 export function setActiveModel(modelName) {

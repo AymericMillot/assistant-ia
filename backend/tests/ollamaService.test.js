@@ -21,7 +21,7 @@ const installedModels = [
   { name: "principal:latest", size: 5 },
   { name: "pense:latest", size: 3 },
   { name: "secours:latest", size: 1 },
-  { name: "nomic-embed-text-v2-moe:latest", size: 0.5 }
+  { name: "embeddinggemma-2:740m", size: 0.5 }
 ];
 
 function readJsonBody(req) {

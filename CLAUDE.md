@@ -48,7 +48,7 @@ The project is a local RAG-based AI assistant, generic and configurable for any 
 1. User submits a question at `GET /` (public, no auth)
 2. Frontend sends to `POST /api/chat` → `backend/routes/chat.js`
 3. Request enters a **Bull queue** (`queueService.js`) backed by Redis — enforces one active chat at a time
-4. `ragService.js` embeds the question via Ollama (`nomic-embed-text-v2-moe`), searches ChromaDB per-folder collections, ranks chunks, and builds a context string
+4. `ragService.js` embeds the question via Ollama (`embeddinggemma-2:740m`), searches ChromaDB per-folder collections, ranks chunks, and builds a context string
 5. Context + conversation history + enabled `manual_resources` (instructions/links from DB) + `improvement_rules` (feedback-derived rules) are assembled into a prompt
 6. Prompt is streamed to Ollama (`ollamaService.js`), and tokens are forwarded to the client via **Socket.IO** (`realtimeService.js`)
 

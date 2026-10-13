@@ -23,6 +23,7 @@ import {
   markInteractiveRequestStarted,
   shutdownSchedulerService
 } from "./services/schedulerService.js";
+import { initializeModelMigration, shutdownModelMigration } from "./services/modelMigrationService.js";
 import { setSocketServer } from "./services/realtimeService.js";
 import { getCurrentVersion } from "./services/appInfoService.js";
 import { getPublicReleases } from "./services/updateService.js";
@@ -268,6 +269,7 @@ await syncFilesystemToDatabase().catch((error) => {
 });
 initializeQueueService();
 initializeSchedulerService();
+initializeModelMigration();
 // Pieces jointes restees en attente ou interrompues par un redemarrage.
 setTimeout(() => {
   try {
@@ -548,6 +550,7 @@ const shutdown = async (signal) => {
   hardExitTimer.unref();
 
   shutdownSchedulerService();
+  shutdownModelMigration();
   abortActiveChatStreams("Le serveur redémarre. Réessayez votre question dans un instant.");
   io.disconnectSockets(true);
   await closeHttpServer(shutdownGraceMs);

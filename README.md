@@ -235,8 +235,8 @@ Le conteneur Ollama démarre vide. Télécharger le modèle de conversation et c
 définis dans `.env` (`DEFAULT_MODEL`, `EMBEDDING_MODEL`) :
 
 ```bash
-docker exec assistant-ia-ollama ollama pull gemma2:2b
-docker exec assistant-ia-ollama ollama pull nomic-embed-text-v2-moe:latest
+docker exec assistant-ia-ollama ollama pull gemma4:e4b
+docker exec assistant-ia-ollama ollama pull embeddinggemma-2:740m
 ```
 
 ### 4. Créer le compte administrateur initial

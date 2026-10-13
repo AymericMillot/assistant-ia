@@ -1,3 +1,30 @@
+Version 1.1.7 — nouveaux modèles par défaut et mises à jour automatiques plus fiables
+(13 octobre 2026).
+
+Modèles :
+- Nouveaux modèles de référence : gemma4:e4b pour la conversation et
+  embeddinggemma-2:740m pour l'embedding (par défaut à l'installation).
+- Migration automatique, une seule fois, au premier démarrage après cette mise
+  à jour : les deux modèles sont téléchargés, puis tous les autres modèles
+  Ollama sont supprimés et les rôles image/raisonnement sont vidés. Rien n'est
+  supprimé tant que les nouveaux modèles ne sont pas installés ; en cas
+  d'échec, nouvelle tentative toutes les 10 minutes.
+- Le changement d'embedding invalide les index : tous les documents sont
+  réindexés automatiquement (la recherche documentaire est réduite pendant ce
+  temps). MODEL_MIGRATION_DISABLED=true désactive la migration.
+- Le modèle d'embedding actif s'affiche désormais sur le tableau de bord de
+  l'administration.
+
+Mises à jour :
+- Mise à jour automatique de minuit : en cas d'échec de la vérification
+  (service de mise à jour qui redémarre, GitHub injoignable, serveur éteint à
+  minuit), nouvelles tentatives pendant 22 h au lieu de 3 h
+  (AUTO_UPDATE_RETRY_WINDOW_MINUTES).
+- Vérification des versions retentée après 30 s (au lieu de 2 min) quand
+  aucune liste n'a pu être récupérée.
+- Le message « service de mise à jour temporairement indisponible » est
+  remplacé par une information claire : nouvelle tentative automatique.
+
 Version 1.1.6 — fiabilité et performances du chat, de l'indexation et de l'interface
 (7 octobre 2026).
 
