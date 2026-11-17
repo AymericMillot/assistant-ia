@@ -1,3 +1,10 @@
+Version 1.1.8 — version de test du circuit de mise à jour
+(17 novembre 2026).
+
+- Aucun changement fonctionnel : cette version sert uniquement à vérifier que
+  la détection et l'installation d'une mise à jour fonctionnent de bout en
+  bout (vérification des versions, téléchargement, installation, redémarrage).
+
 Version 1.1.7 — nouveaux modèles par défaut et mises à jour automatiques plus fiables
 (13 octobre 2026).
 
