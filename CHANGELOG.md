@@ -1,5 +1,12 @@
 # Historique des versions
 
+Version 1.1.9 — test du circuit de mise à jour (18 novembre 2026).
+
+- Aucun changement fonctionnel : version publiée pour vérifier la détection et
+  l'installation d'une mise à jour de bout en bout.
+
+---
+
 Version 1.1.8 — test du circuit de mise à jour (17 novembre 2026).
 
 - Aucun changement fonctionnel : version publiée pour vérifier la détection et
